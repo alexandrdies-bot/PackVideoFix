@@ -1,0 +1,14 @@
+﻿bin/
+obj/
+.vs/
+
+# local config (не коммитим реальные настройки)
+appsettings.json
+
+# локальные данные
+*.db
+data/
+PackRecords/
+
+# логи
+*.log
