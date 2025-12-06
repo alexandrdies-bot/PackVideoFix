@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Windows.Forms;
@@ -19,90 +20,64 @@ public sealed class VideoSearchForm : Form
         _root = recordRoot;
 
         Text = "Поиск видео";
-        Width = 1000;
+        Width = 1100;
         Height = 650;
+        StartPosition = FormStartPosition.CenterParent;
 
-        _tb = new TextBox { Dock = DockStyle.Top, PlaceholderText = "Введите штрихкод или его часть..." };
-        _btn = new Button { Dock = DockStyle.Top, Height = 34, Text = "Найти" };
+        var top = new Panel { Dock = DockStyle.Top, Height = 44, Padding = new Padding(8) };
+        _tb = new TextBox { Dock = DockStyle.Fill, PlaceholderText = "Штрихкод (часть)..." };
+        _btn = new Button { Dock = DockStyle.Right, Width = 140, Text = "Найти" };
         _btn.Click += (_, __) => Search();
+
+        top.Controls.Add(_tb);
+        top.Controls.Add(_btn);
 
         _lv = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true };
         _lv.Columns.Add("Время", 170);
         _lv.Columns.Add("ШК", 240);
         _lv.Columns.Add("Статус", 110);
-        _lv.Columns.Add("Файл", 430);
-
+        _lv.Columns.Add("Файл", 520);
         _lv.DoubleClick += (_, __) => OpenSelected();
 
         Controls.Add(_lv);
-        Controls.Add(_btn);
-        Controls.Add(_tb);
-
-        Shown += (_, __) => SearchRecent();
-    }
-
-    private void SearchRecent()
-    {
-        var now = DateTime.Now.Date;
-        var days = new[] { now, now.AddDays(-1) };
-
-        var list = new List<MainForm.ClipMeta>();
-
-        foreach (var d in days)
-        {
-            var folder = Path.Combine(_root, d.ToString("yyyy-MM-dd"));
-            if (!Directory.Exists(folder)) continue;
-
-            foreach (var f in Directory.EnumerateFiles(folder, "*.json", SearchOption.AllDirectories))
-            {
-                var meta = MainForm.TryReadMeta(f);
-                if (meta != null) list.Add(meta);
-            }
-        }
-
-        Fill(list.OrderByDescending(x => x.StartedAt).Take(200).ToList());
+        Controls.Add(top);
     }
 
     private void Search()
     {
-        var q = (_tb.Text ?? "").Trim();
-        if (q.Length == 0) { SearchRecent(); return; }
+        _lv.BeginUpdate();
+        _lv.Items.Clear();
 
-        var result = new List<MainForm.ClipMeta>();
         if (!Directory.Exists(_root))
         {
+            _lv.EndUpdate();
             MessageBox.Show("Папка не найдена: " + _root);
             return;
         }
 
+        var q = (_tb.Text ?? "").Trim();
+        var list = new List<ClipMeta>(); // ВАЖНО: ClipMeta (НЕ MainForm.ClipMeta)
+
         foreach (var f in Directory.EnumerateFiles(_root, "*.json", SearchOption.AllDirectories))
         {
-            var meta = MainForm.TryReadMeta(f);
+            var meta = MainForm.TryReadMeta(f); // TryReadMeta возвращает ClipMeta
             if (meta == null) continue;
 
-            if (!string.IsNullOrWhiteSpace(meta.Barcode) &&
-                meta.Barcode.Contains(q, StringComparison.OrdinalIgnoreCase))
+            if (string.IsNullOrWhiteSpace(q) ||
+                (!string.IsNullOrWhiteSpace(meta.Barcode) &&
+                 meta.Barcode.Contains(q, StringComparison.OrdinalIgnoreCase)))
             {
-                result.Add(meta);
-                if (result.Count >= 500) break;
+                list.Add(meta);
             }
         }
 
-        Fill(result.OrderByDescending(x => x.StartedAt).ToList());
-    }
-
-    private void Fill(List<MainForm.ClipMeta> items)
-    {
-        _lv.BeginUpdate();
-        _lv.Items.Clear();
-
-        foreach (var c in items)
+        foreach (var c in list.OrderByDescending(x => x.StartedAt).Take(300))
         {
             var it = new ListViewItem(c.StartedAt.ToString("yyyy-MM-dd HH:mm:ss"));
             it.SubItems.Add(c.Barcode ?? "");
             it.SubItems.Add(c.Status ?? "");
             it.SubItems.Add(c.VideoPath ?? "");
-            it.Tag = c;
+            it.Tag = c; // Tag хранит ClipMeta
             _lv.Items.Add(it);
         }
 
@@ -112,7 +87,8 @@ public sealed class VideoSearchForm : Form
     private void OpenSelected()
     {
         if (_lv.SelectedItems.Count == 0) return;
-        if (_lv.SelectedItems[0].Tag is not MainForm.ClipMeta c) return;
+
+        if (_lv.SelectedItems[0].Tag is not ClipMeta c) return; // ВАЖНО: ClipMeta
 
         if (string.IsNullOrWhiteSpace(c.VideoPath) || !File.Exists(c.VideoPath))
         {
@@ -120,7 +96,7 @@ public sealed class VideoSearchForm : Form
             return;
         }
 
-        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        Process.Start(new ProcessStartInfo
         {
             FileName = c.VideoPath,
             UseShellExecute = true

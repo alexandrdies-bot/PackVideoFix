@@ -4,8 +4,9 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
-using System.Linq;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace PackVideoFix;
@@ -18,21 +19,22 @@ public sealed class MainForm : Form
     // ---------- UI ----------
     private readonly PictureBox _preview;
 
-    // Right panel (Ozon info placeholder)
     private readonly Label _lblPosting;
     private readonly PictureBox _picProduct;
     private readonly Button _btnStopDelete;
 
-    // Menu + status bar
     private readonly MenuStrip _menu;
     private readonly StatusStrip _statusStrip;
     private readonly ToolStripStatusLabel _statusLabel;
 
-    // Split (храним полем, чтобы употреблять в Shown)
     private readonly SplitContainer _split;
 
     // ---------- SCANNER FILTER ----------
     private BarcodeMessageFilter? _scanFilter;
+
+    // ---------- OZON ----------
+    private OzonClient? _ozon;
+    private CancellationTokenSource? _ozonCts;
 
     // ---------- CAMERA ----------
     private VideoCapture? _cap;
@@ -47,9 +49,9 @@ public sealed class MainForm : Form
     private string? _currentBarcode;
     private DateTime _recStartedAt;
 
-    private string? _tempVideoPath;   // ...part.avi
-    private string? _finalVideoPath;  // ...avi
-    private string? _metaPath;        // ...json
+    private string? _tempVideoPath;   // local ...part.avi
+    private string? _finalVideoPath;  // final storage ...avi
+    private string? _metaPath;        // final storage ...json
 
     public MainForm()
     {
@@ -58,36 +60,43 @@ public sealed class MainForm : Form
         Height = 820;
 
         LoadConfig();
+        RebuildOzonClient();
 
-        // Глобальный перехват сканера (работает даже если фокус на меню/кнопке)
+        // Глобальный перехват сканера
         _scanFilter = new BarcodeMessageFilter(code =>
         {
-            // всегда в UI-поток
             BeginInvoke(new Action(() => HandleBarcode(code)));
         });
         Application.AddMessageFilter(_scanFilter);
 
-        // ----- Menu (top) -----
+        // ----- Menu -----
         _menu = new MenuStrip();
 
         var miSettings = new ToolStripMenuItem("Настройки");
-        miSettings.Click += (_, __) => MessageBox.Show("Настройки добавим позже.");
+        miSettings.Click += (_, __) =>
+        {
+            using var f = new SettingsForm(_cfg);
+            if (f.ShowDialog(this) == DialogResult.OK)
+            {
+                _cfg = f.ResultConfig;
+                RebuildOzonClient();
+                SetStatus($"Настройки сохранены. Station={_cfg.StationName} | Temp={_cfg.TempRootLocal} | Store={_cfg.RecordRoot}");
+            }
+        };
 
         var miSearch = new ToolStripMenuItem("Поиск видео");
         miSearch.Click += (_, __) =>
         {
-            // Если VideoSearchForm ещё нет — закомментируй это меню временно
             using var f = new VideoSearchForm(_cfg.RecordRoot);
             f.ShowDialog(this);
         };
 
         _menu.Items.Add(miSettings);
         _menu.Items.Add(miSearch);
-
         MainMenuStrip = _menu;
         Controls.Add(_menu);
 
-        // ----- Status bar (bottom) -----
+        // ----- Status bar -----
         _statusStrip = new StatusStrip();
         _statusLabel = new ToolStripStatusLabel("Готово");
         _statusStrip.Items.Add(_statusLabel);
@@ -105,7 +114,7 @@ public sealed class MainForm : Form
         _lblPosting = new Label
         {
             Dock = DockStyle.Top,
-            Height = 90,
+            Height = 100,
             Font = new Font("Segoe UI", 16, FontStyle.Bold),
             Text = "Отправление: —\nТовар: —",
             Padding = new Padding(10)
@@ -132,27 +141,17 @@ public sealed class MainForm : Form
         };
         _btnStopDelete.FlatAppearance.BorderSize = 0;
         _btnStopDelete.Click += (_, __) => StopAndDelete("manual-stop-delete");
-
         SetStopButtonState(recording: false);
 
-        var right = new Panel
-        {
-            Dock = DockStyle.Fill,
-            Padding = new Padding(10)
-        };
+        var right = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
         right.Controls.Add(_btnStopDelete);
         right.Controls.Add(_picProduct);
         right.Controls.Add(_lblPosting);
 
-        // ----- SplitContainer (ВАЖНО: НЕ задаём minSize здесь, иначе может упасть на старте) -----
-        _split = new SplitContainer
-        {
-            Dock = DockStyle.Fill
-        };
+        _split = new SplitContainer { Dock = DockStyle.Fill };
         _split.Panel1.Controls.Add(_preview);
         _split.Panel2.Controls.Add(right);
 
-        // FixSplitter вызываем только когда есть реальный размер
         _split.SizeChanged += (_, __) =>
         {
             if (_split.ClientSize.Width > 0)
@@ -163,18 +162,24 @@ public sealed class MainForm : Form
 
         Shown += (_, __) =>
         {
-            SetStatus($"Станция: {_cfg.StationName} | Папка: {_cfg.RecordRoot} | Скан=старт/стоп");
+            SetStatus($"Станция: {_cfg.StationName} | Temp: {_cfg.TempRootLocal} | Store: {_cfg.RecordRoot} | Скан=старт/стоп");
 
-            // minSize задаём тут (форма уже имеет реальный размер)
             _split.Panel1MinSize = 400;
             _split.Panel2MinSize = 320;
-
             FixSplitter(_split);
+
             StartCamera();
         };
 
         FormClosing += (_, __) =>
         {
+            try { _ozonCts?.Cancel(); } catch { }
+            try { _ozonCts?.Dispose(); } catch { }
+            _ozonCts = null;
+
+            try { _ozon?.Dispose(); } catch { }
+            _ozon = null;
+
             try
             {
                 if (_scanFilter != null) Application.RemoveMessageFilter(_scanFilter);
@@ -187,7 +192,7 @@ public sealed class MainForm : Form
     }
 
     // =========================
-    // Splitter fix (чтобы не падало)
+    // Splitter fix
     // =========================
     private static void FixSplitter(SplitContainer split)
     {
@@ -204,7 +209,6 @@ public sealed class MainForm : Form
         int maxLeft = Math.Max(minLeft, width - minRight);
         left = Math.Max(minLeft, Math.Min(left, maxLeft));
 
-        // применяем только если безопасно и отличается
         if (left >= minLeft && left <= maxLeft && split.SplitterDistance != left)
         {
             try { split.SplitterDistance = left; } catch { }
@@ -216,20 +220,17 @@ public sealed class MainForm : Form
     // =========================
     private void LoadConfig()
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
-        if (!File.Exists(path))
-        {
-            _cfg = AppConfig.Default();
-            return;
-        }
+        _cfg = AppConfig.Load();
+    }
 
-        try
+    private void RebuildOzonClient()
+    {
+        try { _ozon?.Dispose(); } catch { }
+        _ozon = null;
+
+        if (!string.IsNullOrWhiteSpace(_cfg.OzonClientId) && !string.IsNullOrWhiteSpace(_cfg.OzonApiKey))
         {
-            _cfg = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(path)) ?? AppConfig.Default();
-        }
-        catch
-        {
-            _cfg = AppConfig.Default();
+            _ozon = new OzonClient(_cfg.OzonBaseUrl ?? "https://api-seller.ozon.ru", _cfg.OzonClientId!, _cfg.OzonApiKey!);
         }
     }
 
@@ -289,7 +290,6 @@ public sealed class MainForm : Form
         using var mat = new Mat();
         if (!_cap.Read(mat) || mat.Empty()) return;
 
-        // preview
         var bmp = BitmapConverter.ToBitmap(mat);
         var old = _preview.Image;
         _preview.Image = bmp;
@@ -361,7 +361,7 @@ public sealed class MainForm : Form
     // =========================
     private void HandleBarcode(string barcode)
     {
-        ShowOzonPlaceholder(barcode);
+        _ = UpdateOzonInfoAsync(barcode);
 
         if (_cap == null)
         {
@@ -385,12 +385,47 @@ public sealed class MainForm : Form
                 return;
             }
 
-            // тот же штрихкод => завершить
             shouldFinalize = true;
         }
 
         if (shouldFinalize)
             StopAndFinalize("second-scan");
+    }
+
+    private async Task UpdateOzonInfoAsync(string barcode)
+    {
+        try { _ozonCts?.Cancel(); } catch { }
+        try { _ozonCts?.Dispose(); } catch { }
+        _ozonCts = new CancellationTokenSource();
+
+        var ct = _ozonCts.Token;
+
+        _lblPosting.Text = $"Отправление: —\nШтрихкод: {barcode}";
+        SetProductImage(null);
+
+        if (_ozon == null) return;
+
+        var (ok, msg, posting) = await _ozon.TryGetPostingByBarcodeAsync(barcode, ct);
+        if (ct.IsCancellationRequested) return;
+
+        if (ok && !string.IsNullOrWhiteSpace(posting))
+            _lblPosting.Text = $"Отправление: {posting}\nШтрихкод: {barcode}";
+        else
+            _lblPosting.Text = $"Отправление: —\nШтрихкод: {barcode}\n(Ozon: {Trim1Line(msg)})";
+    }
+
+    private static string Trim1Line(string s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return "ошибка";
+        s = s.Replace("\r", " ").Replace("\n", " ");
+        return s.Length > 80 ? s.Substring(0, 80) + "…" : s;
+    }
+
+    private void SetProductImage(Image? img)
+    {
+        var old = _picProduct.Image;
+        _picProduct.Image = img;
+        old?.Dispose();
     }
 
     private void StartRecordingFlow_WithExistingCheck(string barcode)
@@ -423,16 +458,21 @@ public sealed class MainForm : Form
 
         var now = DateTime.Now;
         var dateFolder = now.ToString("yyyy-MM-dd");
-        var baseFolder = Path.Combine(_cfg.RecordRoot, dateFolder, _cfg.StationName);
-        Directory.CreateDirectory(baseFolder);
-
         var safeBarcode = MakeSafeFilePart(barcode);
         var stamp = now.ToString("yyyyMMdd_HHmmss_fff");
         var baseName = $"{safeBarcode}_{stamp}_{_cfg.StationName}";
 
-        _finalVideoPath = Path.Combine(baseFolder, baseName + ".avi");
-        _tempVideoPath = Path.Combine(baseFolder, baseName + ".part.avi");
-        _metaPath = Path.Combine(baseFolder, baseName + ".json");
+        // TEMP (local)
+        var tempFolder = Path.Combine(_cfg.TempRootLocal, dateFolder, _cfg.StationName);
+        Directory.CreateDirectory(tempFolder);
+
+        // FINAL (storage, can be NAS)
+        var finalFolder = Path.Combine(_cfg.RecordRoot, dateFolder, _cfg.StationName);
+        Directory.CreateDirectory(finalFolder);
+
+        _tempVideoPath = Path.Combine(tempFolder, baseName + ".part.avi");
+        _finalVideoPath = Path.Combine(finalFolder, baseName + ".avi");
+        _metaPath = Path.Combine(finalFolder, baseName + ".json");
 
         lock (_recLock)
         {
@@ -444,9 +484,7 @@ public sealed class MainForm : Form
             _currentBarcode = barcode;
             _recStartedAt = now;
 
-            // ВАЖНО: при каждой новой записи обязательно снова ждать первый кадр
-            _pendingWriterInit = true;
-
+            _pendingWriterInit = true; // важно для каждой новой записи
             SetStopButtonState(recording: true);
         }
 
@@ -495,15 +533,16 @@ public sealed class MainForm : Form
                 return;
             }
 
-            if (File.Exists(final)) File.Delete(final);
-
             if (!File.Exists(temp))
             {
                 SetStatus("Файл записи не найден (.part.avi).");
                 return;
             }
 
-            File.Move(temp, final);
+            Directory.CreateDirectory(Path.GetDirectoryName(final)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(meta)!);
+
+            MoveOrCopy(temp, final);
 
             var clip = new ClipMeta
             {
@@ -530,7 +569,22 @@ public sealed class MainForm : Form
         }
     }
 
-    // Button STOP = stop + delete current recording
+    private static void MoveOrCopy(string src, string dst)
+    {
+        if (File.Exists(dst)) File.Delete(dst);
+
+        try
+        {
+            File.Move(src, dst);
+        }
+        catch
+        {
+            File.Copy(src, dst, overwrite: true);
+            try { File.Delete(src); } catch { }
+        }
+    }
+
+    // STOP button = stop + delete current recording
     private void StopAndDelete(string reason)
     {
         string? temp;
@@ -600,16 +654,7 @@ public sealed class MainForm : Form
     }
 
     // =========================
-    // RIGHT PANEL (Ozon placeholder)
-    // =========================
-    private void ShowOzonPlaceholder(string barcode)
-    {
-        _lblPosting.Text = $"Отправление: (Ozon позже)\nШтрихкод: {barcode}";
-        _picProduct.Image = null;
-    }
-
-    // =========================
-    // SEARCH / LIST (used by Search window)
+    // SEARCH / LIST
     // =========================
     internal static ClipMeta? TryReadMeta(string path)
     {
@@ -697,32 +742,6 @@ public sealed class MainForm : Form
     }
 
     private void SetStatus(string text) => _statusLabel.Text = text;
-
-    // =========================
-    // MODELS
-    // =========================
-    private sealed class AppConfig
-    {
-        public string RecordRoot { get; set; } = @"D:\PackRecords";
-        public string StationName { get; set; } = "PACK-01";
-        public int CameraIndex { get; set; } = 0;
-
-        // 0 = выключить, иначе авто-стоп по времени
-        public int MaxClipSeconds { get; set; } = 0;
-
-        public static AppConfig Default() => new();
-    }
-
-    internal sealed class ClipMeta
-    {
-        public string? Barcode { get; set; }
-        public string? Station { get; set; }
-        public DateTime StartedAt { get; set; }
-        public DateTime FinishedAt { get; set; }
-        public string? Status { get; set; }
-        public string? Reason { get; set; }
-        public string? VideoPath { get; set; }
-    }
 }
 
 // =========================
@@ -753,7 +772,7 @@ internal sealed class BarcodeMessageFilter : IMessageFilter
             var code = _buf.Trim();
             _buf = "";
             if (code.Length > 0) _onScan(code);
-            return true; // Enter обработали
+            return true;
         }
 
         if (!char.IsControl(ch))
