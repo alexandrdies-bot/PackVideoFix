@@ -29,6 +29,17 @@ public sealed class VideoSearchForm : Form
         _btn = new Button { Dock = DockStyle.Right, Width = 140, Text = "Найти" };
         _btn.Click += (_, __) => Search();
 
+        // запуск поиска по Enter
+        _tb.KeyDown += (s, e) =>
+        {
+            if (e.KeyCode == Keys.Enter)
+            {
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                Search();
+            }
+        };
+
         top.Controls.Add(_tb);
         top.Controls.Add(_btn);
 
@@ -41,6 +52,9 @@ public sealed class VideoSearchForm : Form
 
         Controls.Add(_lv);
         Controls.Add(top);
+
+        // при ОТКРЫТИИ окна всегда перечитываем JSON‑ы
+        Search();
     }
 
     private void Search()
@@ -56,11 +70,11 @@ public sealed class VideoSearchForm : Form
         }
 
         var q = (_tb.Text ?? "").Trim();
-        var list = new List<ClipMeta>(); // ВАЖНО: ClipMeta (НЕ MainForm.ClipMeta)
+        var list = new List<ClipMeta>();
 
         foreach (var f in Directory.EnumerateFiles(_root, "*.json", SearchOption.AllDirectories))
         {
-            var meta = MainForm.TryReadMeta(f); // TryReadMeta возвращает ClipMeta
+            var meta = MainForm.TryReadMeta(f);
             if (meta == null) continue;
 
             if (string.IsNullOrWhiteSpace(q) ||
@@ -71,13 +85,21 @@ public sealed class VideoSearchForm : Form
             }
         }
 
-        foreach (var c in list.OrderByDescending(x => x.StartedAt).Take(300))
+        // взять по одной (самой новой) записи на каждый штрихкод
+        var latestByBarcode = list
+            .Where(x => !string.IsNullOrWhiteSpace(x.Barcode))
+            .GroupBy(x => x.Barcode!, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.OrderByDescending(x => x.StartedAt).First())
+            .ToList();
+
+        // отсортировать по времени и отобразить
+        foreach (var item in latestByBarcode.OrderByDescending(x => x.StartedAt).Take(300))
         {
-            var it = new ListViewItem(c.StartedAt.ToString("yyyy-MM-dd HH:mm:ss"));
-            it.SubItems.Add(c.Barcode ?? "");
-            it.SubItems.Add(c.Status ?? "");
-            it.SubItems.Add(c.VideoPath ?? "");
-            it.Tag = c; // Tag хранит ClipMeta
+            var it = new ListViewItem(item.StartedAt.ToString("yyyy-MM-dd HH:mm:ss"));
+            it.SubItems.Add(item.Barcode ?? "");
+            it.SubItems.Add(item.Status ?? "");
+            it.SubItems.Add(item.VideoPath ?? "");
+            it.Tag = item;
             _lv.Items.Add(it);
         }
 

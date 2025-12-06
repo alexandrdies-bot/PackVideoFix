@@ -114,7 +114,7 @@ public sealed class MainForm : Form
         _lblPosting = new Label
         {
             Dock = DockStyle.Top,
-            Height = 100,
+            Height = 260,
             Font = new Font("Segoe UI", 16, FontStyle.Bold),
             Text = "Отправление: —\nТовар: —",
             Padding = new Padding(10)
@@ -299,7 +299,14 @@ public sealed class MainForm : Form
 
         lock (_recLock)
         {
-            if (!_isRecording) return;
+            if (!_isRecording)
+            {
+                // DEBUG: сейчас не записываем
+                // SetStatus("DEBUG: GrabFrame -> not recording");
+                return;
+            }
+
+            SetStatus("DEBUG: GrabFrame -> recording, preparing frame");
 
             using var frame = new Mat();
             if (mat.Channels() == 4)
@@ -339,9 +346,10 @@ public sealed class MainForm : Form
                     return;
                 }
 
-                SetStatus($"Запись началась: {_currentBarcode}");
+                SetStatus($"Запись началась: {_currentBarcode} (temp={_tempVideoPath})");
             }
 
+            SetStatus("DEBUG: GrabFrame -> writer write frame");
             _writer?.Write(frame);
 
             if (_cfg.MaxClipSeconds > 0)
@@ -350,11 +358,11 @@ public sealed class MainForm : Form
                 if (elapsed.TotalSeconds >= _cfg.MaxClipSeconds)
                     autoStop = true;
             }
-        }
+        } // ← закрываем lock
 
         if (autoStop)
             StopAndFinalize("auto-max-seconds");
-    }
+    } // ← закрываем метод
 
     // =========================
     // BARCODE WORKFLOW
@@ -397,21 +405,35 @@ public sealed class MainForm : Form
         try { _ozonCts?.Cancel(); } catch { }
         try { _ozonCts?.Dispose(); } catch { }
         _ozonCts = new CancellationTokenSource();
-
         var ct = _ozonCts.Token;
 
         _lblPosting.Text = $"Отправление: —\nШтрихкод: {barcode}";
         SetProductImage(null);
 
-        if (_ozon == null) return;
+        if (_ozon == null)
+        {
+            _lblPosting.Text =
+                "OZON НЕ НАСТРОЕН\n" +
+                $"barcode = {barcode}";
+            return;
+        }
 
         var (ok, msg, posting) = await _ozon.TryGetPostingByBarcodeAsync(barcode, ct);
         if (ct.IsCancellationRequested) return;
 
         if (ok && !string.IsNullOrWhiteSpace(posting))
-            _lblPosting.Text = $"Отправление: {posting}\nШтрихкод: {barcode}";
+        {
+            _lblPosting.Text =
+                $"Отправление: {posting}\n" +
+                $"Штрихкод: {barcode}";
+        }
         else
-            _lblPosting.Text = $"Отправление: —\nШтрихкод: {barcode}\n(Ozon: {Trim1Line(msg)})";
+        {
+            _lblPosting.Text =
+                $"Отправление: —\n" +
+                $"Штрихкод: {barcode}\n" +
+                $"(Ozon: {msg})";   // без Trim1Line
+        }
     }
 
     private static string Trim1Line(string s)
@@ -487,6 +509,7 @@ public sealed class MainForm : Form
             _pendingWriterInit = true; // важно для каждой новой записи
             SetStopButtonState(recording: true);
         }
+        SetStatus($"DEBUG: StartRecording -> isRecording={_isRecording}, temp={_tempVideoPath}");
 
         SetStatus($"Ожидание кадра... (старт записи: {barcode})");
         DropFocusFromButton();
@@ -535,7 +558,7 @@ public sealed class MainForm : Form
 
             if (!File.Exists(temp))
             {
-                SetStatus("Файл записи не найден (.part.avi).");
+                SetStatus($"Файл записи не найден (.part.avi). Путь: {temp}");
                 return;
             }
 

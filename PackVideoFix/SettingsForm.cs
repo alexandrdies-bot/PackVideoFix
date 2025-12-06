@@ -112,6 +112,18 @@ public partial class SettingsForm : Form
             DialogResult = DialogResult.Cancel;
             Close();
         };
+        // --- Добавляем кнопку для теста подключения ---
+        var testConnectionButton = new Button
+        {
+            Text = "Тест подключения",
+            Dock = DockStyle.Fill,
+            Height = 40
+        };
+
+        // Привязываем событие для кнопки
+        testConnectionButton.Click += TestConnectionButton_Click;
+        pnlBtns.Controls.Add(testConnectionButton); // Добавляем кнопку в панель
+
 
         pnlBtns.Controls.Add(btnOk);
         pnlBtns.Controls.Add(btnCancel);
@@ -212,4 +224,53 @@ public partial class SettingsForm : Form
         OzonApiKey = src.OzonApiKey,
         OzonBaseUrl = src.OzonBaseUrl
     };
+    private async void TestConnectionButton_Click(object? sender, EventArgs e)
+    {
+        var clientId = _tbOzonClientId.Text.Trim();
+        var apiKey = _tbOzonApiKey.Text.Trim();
+
+        if (string.IsNullOrEmpty(clientId) || string.IsNullOrEmpty(apiKey))
+        {
+            MessageBox.Show("Пожалуйста, введите Ozon Client-Id и API Key.");
+            return;
+        }
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        try
+        {
+            using var ozonClient = new OzonClient(_cfg.OzonBaseUrl ?? "https://api-seller.ozon.ru", clientId, apiKey);
+
+            // НОВЫЙ ВЫЗОВ: с токеном и распаковкой кортежа
+            var (ok, msg) = await ozonClient.TestConnectionAsync(cts.Token);
+
+            if (ok)
+            {
+                MessageBox.Show(
+                    "Подключение успешно!\n\n" + msg,
+                    "Ozon",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            else
+            {
+                MessageBox.Show(
+                    "Ошибка подключения.\n\n" + msg,
+                    "Ozon",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                "Ошибка при проверке подключения:\n" + ex.Message,
+                "Ozon",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+    }
+
+
+
 }
