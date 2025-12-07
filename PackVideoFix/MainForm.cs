@@ -1,9 +1,11 @@
-﻿using OpenCvSharp;
+﻿// File: /mnt/data/MainForm.cs
+using OpenCvSharp;
 using OpenCvSharp.Extensions;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
+using System.Net.Http; // ⟵ для скачивания фото
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -191,24 +193,16 @@ public sealed class MainForm : Form
         };
     }
 
-    // =========================
-    // Splitter fix
-    // =========================
     private static void FixSplitter(SplitContainer split)
     {
         int desiredRight = 380;
-
         int minLeft = split.Panel1MinSize > 0 ? split.Panel1MinSize : 200;
         int minRight = split.Panel2MinSize > 0 ? split.Panel2MinSize : 200;
-
         int width = split.ClientSize.Width;
         if (width <= 0) return;
-
         int left = width - desiredRight;
-
         int maxLeft = Math.Max(minLeft, width - minRight);
         left = Math.Max(minLeft, Math.Min(left, maxLeft));
-
         if (left >= minLeft && left <= maxLeft && split.SplitterDistance != left)
         {
             try { split.SplitterDistance = left; } catch { }
@@ -301,12 +295,8 @@ public sealed class MainForm : Form
         {
             if (!_isRecording)
             {
-                // DEBUG: сейчас не записываем
-                // SetStatus("DEBUG: GrabFrame -> not recording");
                 return;
             }
-
-            SetStatus("DEBUG: GrabFrame -> recording, preparing frame");
 
             using var frame = new Mat();
             if (mat.Channels() == 4)
@@ -349,7 +339,6 @@ public sealed class MainForm : Form
                 SetStatus($"Запись началась: {_currentBarcode} (temp={_tempVideoPath})");
             }
 
-            SetStatus("DEBUG: GrabFrame -> writer write frame");
             _writer?.Write(frame);
 
             if (_cfg.MaxClipSeconds > 0)
@@ -358,11 +347,11 @@ public sealed class MainForm : Form
                 if (elapsed.TotalSeconds >= _cfg.MaxClipSeconds)
                     autoStop = true;
             }
-        } // ← закрываем lock
+        }
 
         if (autoStop)
             StopAndFinalize("auto-max-seconds");
-    } // ← закрываем метод
+    }
 
     // =========================
     // BARCODE WORKFLOW
@@ -418,21 +407,43 @@ public sealed class MainForm : Form
             return;
         }
 
-        var (ok, msg, posting) = await _ozon.TryGetPostingByBarcodeAsync(barcode, ct);
+        // Новый вызов: номер + url главной картинки
+        var (ok, msg, posting, imgUrl) = await _ozon.TryGetPostingAndImageByBarcodeAsync(barcode, ct);
         if (ct.IsCancellationRequested) return;
 
         if (ok && !string.IsNullOrWhiteSpace(posting))
         {
-            _lblPosting.Text =
-                $"Отправление: {posting}\n" +
-                $"Штрихкод: {barcode}";
+            _lblPosting.Text = $"Отправление: {posting}\nШтрихкод: {barcode}";
+
+            if (!string.IsNullOrWhiteSpace(imgUrl))
+            {
+                try
+                {
+                    using var http = new HttpClient(); // без ozon-хедеров, чтобы не ломать CDN
+                    var bytes = await http.GetByteArrayAsync(imgUrl, ct);
+                    if (ct.IsCancellationRequested) return;
+                    using var ms = new MemoryStream(bytes);
+                    var img = Image.FromStream(ms);
+                    SetProductImage((Image)img.Clone());
+                }
+                catch
+                {
+                    // намеренно тихо — картинка не критична
+                    SetProductImage(null);
+                }
+            }
+            else
+            {
+                SetProductImage(null);
+            }
         }
         else
         {
             _lblPosting.Text =
                 $"Отправление: —\n" +
                 $"Штрихкод: {barcode}\n" +
-                $"(Ozon: {msg})";   // без Trim1Line
+                $"(Ozon: {msg})";
+            SetProductImage(null);
         }
     }
 
@@ -484,11 +495,9 @@ public sealed class MainForm : Form
         var stamp = now.ToString("yyyyMMdd_HHmmss_fff");
         var baseName = $"{safeBarcode}_{stamp}_{_cfg.StationName}";
 
-        // TEMP (local)
         var tempFolder = Path.Combine(_cfg.TempRootLocal, dateFolder, _cfg.StationName);
         Directory.CreateDirectory(tempFolder);
 
-        // FINAL (storage, can be NAS)
         var finalFolder = Path.Combine(_cfg.RecordRoot, dateFolder, _cfg.StationName);
         Directory.CreateDirectory(finalFolder);
 
@@ -506,11 +515,9 @@ public sealed class MainForm : Form
             _currentBarcode = barcode;
             _recStartedAt = now;
 
-            _pendingWriterInit = true; // важно для каждой новой записи
+            _pendingWriterInit = true;
             SetStopButtonState(recording: true);
         }
-        SetStatus($"DEBUG: StartRecording -> isRecording={_isRecording}, temp={_tempVideoPath}");
-
         SetStatus($"Ожидание кадра... (старт записи: {barcode})");
         DropFocusFromButton();
     }
@@ -607,7 +614,6 @@ public sealed class MainForm : Form
         }
     }
 
-    // STOP button = stop + delete current recording
     private void StopAndDelete(string reason)
     {
         string? temp;
@@ -665,20 +671,17 @@ public sealed class MainForm : Form
         if (recording)
         {
             _btnStopDelete.Enabled = true;
-            _btnStopDelete.BackColor = Color.Red;
-            _btnStopDelete.ForeColor = Color.White;
+            _btnStopDelete.BackColor = System.Drawing.Color.Red;
+            _btnStopDelete.ForeColor = System.Drawing.Color.White;
         }
         else
         {
             _btnStopDelete.Enabled = false;
-            _btnStopDelete.BackColor = Color.Gainsboro;
-            _btnStopDelete.ForeColor = Color.Black;
+            _btnStopDelete.BackColor = System.Drawing.Color.Gainsboro;
+            _btnStopDelete.ForeColor = System.Drawing.Color.Black;
         }
     }
 
-    // =========================
-    // SEARCH / LIST
-    // =========================
     internal static ClipMeta? TryReadMeta(string path)
     {
         try
@@ -713,9 +716,6 @@ public sealed class MainForm : Form
         return result;
     }
 
-    // =========================
-    // ARCHIVE (REPLACE)
-    // =========================
     private void ArchiveExisting(string barcode, List<ClipMeta> existing)
     {
         try
@@ -767,9 +767,6 @@ public sealed class MainForm : Form
     private void SetStatus(string text) => _statusLabel.Text = text;
 }
 
-// =========================
-// GLOBAL BARCODE INPUT FILTER
-// =========================
 internal sealed class BarcodeMessageFilter : IMessageFilter
 {
     private readonly Action<string> _onScan;
@@ -795,7 +792,7 @@ internal sealed class BarcodeMessageFilter : IMessageFilter
             var code = _buf.Trim();
             _buf = "";
             if (code.Length > 0) _onScan(code);
-            return true;
+            return true; // почему: гасим эхо в активном контроле
         }
 
         if (!char.IsControl(ch))
