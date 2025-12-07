@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
+using System.Collections.Generic;
 
 namespace PackVideoFix
 {
@@ -21,74 +22,84 @@ namespace PackVideoFix
             ClientId = clientId ?? string.Empty;
             ApiKey = apiKey ?? string.Empty;
 
-            _httpClient = new HttpClient
-            {
-                BaseAddress = new Uri(BaseUrl)
-            };
+            _httpClient = new HttpClient { BaseAddress = new Uri(BaseUrl) };
             _httpClient.DefaultRequestHeaders.Add("Client-Id", ClientId);
             _httpClient.DefaultRequestHeaders.Add("Api-Key", ApiKey);
         }
 
-        /// <summary>
-        /// ВРЕМЕННО: получить номер отправления.
-        /// Сейчас: просто берёт первый товар и первый posting за последние ~сутки.
-        /// Потом сюда добавим сопоставление со штрихкодом и фильтр по складу.
-        /// </summary>
+        // ============================================================
+        // 🔍 Новый вариант — реальный поиск по штрихкоду
+        // ============================================================
         public async Task<(bool Success, string Message, string PostingNumber)> TryGetPostingByBarcodeAsync(
-    string barcode,
-    CancellationToken ct)
+            string barcode,
+            CancellationToken ct)
         {
+            if (string.IsNullOrWhiteSpace(barcode))
+                return (false, "Пустой штрихкод.", "");
+
             try
             {
-                var now = DateTime.UtcNow;
-                var from = now.AddDays(-1).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
-                var to = now.AddDays(1).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
+                // 1️⃣ Пробуем прямой метод Ozon
+                try
+                {
+                    var req1 = new { barcodes = new[] { barcode } };
+                    var json1 = await SendAsync("/v2/postings/barcode", req1, ct);
+                    var resp1 = JsonConvert.DeserializeObject<OzonPostingBarcodeResponse>(json1);
 
+                    var posting = resp1?.Result?.FirstOrDefault();
+                    if (posting != null && !string.IsNullOrWhiteSpace(posting.PostingNumber))
+                        return (true, "OK (v2/barcode)", posting.PostingNumber);
+                }
+                catch
+                {
+                    // пропускаем, если метод недоступен (часто не у всех продавцов)
+                }
+
+                // 2️⃣ Фолбэк через /v3/posting/fbs/list (ищем по фильтру с баркодом)
+                var now = DateTime.UtcNow;
                 var request = new
                 {
                     filter = new
                     {
-                        cutoff_from = from,
-                        cutoff_to = to
-                        // delivery_method_id УБРАЛИ, чтобы не ломать proto
+                        since = now.AddDays(-3).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+                        to = now.AddDays(1).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+                        barcode = barcode
                     },
-                    dir = "ASC",
                     limit = 50,
                     offset = 0
                 };
 
-                var json = await SendAsync("/v1/assembly/fbs/product/list", request, ct);
-                var resp = JsonConvert.DeserializeObject<FbsProductListResponse>(json);
+                var json2 = await SendAsync("/v3/posting/fbs/list", request, ct);
+                var resp2 = JsonConvert.DeserializeObject<FbsPostingListResponse>(json2);
 
-                if (resp == null || resp.Products == null || resp.Products.Count == 0)
-                    return (false, "Список товаров в отправлениях пуст.", "");
+                var posting2 = resp2?.Result?.Postings?.FirstOrDefault();
+                if (posting2 == null)
+                    return (false, $"Отправление по штрихкоду {barcode} не найдено.", "");
 
-                var firstProduct = resp.Products[0];
-                var firstPosting = firstProduct.Postings.FirstOrDefault();
+                // фильтр по складу (пример: исключаем Fantasy Craft)
+                if (!string.IsNullOrWhiteSpace(posting2.WarehouseName) &&
+                    posting2.WarehouseName.Contains("Fantasy", StringComparison.OrdinalIgnoreCase))
+                {
+                    return (false, $"Склад {posting2.WarehouseName} исключён из поиска.", "");
+                }
 
-                if (firstPosting == null || string.IsNullOrWhiteSpace(firstPosting.PostingNumber))
-                    return (false, "В ответе нет posting_number.", "");
-
-                return (true, "", firstPosting.PostingNumber);
+                return (true, "OK (v3/list)", posting2.PostingNumber);
             }
             catch (Exception ex)
             {
-                return (false, "Ошибка запроса к Ozon: " + ex.Message, "");
+                return (false, "Ошибка при запросе к Ozon: " + ex.Message, "");
             }
         }
 
-        /// <summary>
-        /// Проверка подключения к Ozon (используется в SettingsForm).
-        /// </summary>
+        // ============================================================
+        // Проверка подключения (оставлено без изменений)
+        // ============================================================
         public async Task<(bool Success, string Message)> TestConnectionAsync(CancellationToken ct)
         {
             try
             {
-                // как в рабочем проекте: пробуем получить список складов
                 var json = await SendAsync("/v1/warehouse/list", new { }, ct);
-
-                return (true,
-                    "Подключение к Ozon успешно. Удалось получить список складов.\nОтвет: " + json);
+                return (true, "Подключение успешно. Ответ: " + json);
             }
             catch (Exception ex)
             {
@@ -96,13 +107,14 @@ namespace PackVideoFix
             }
         }
 
+        // ============================================================
+        // Общий метод HTTP POST
+        // ============================================================
         private async Task<string> SendAsync(string endpoint, object payload, CancellationToken ct)
         {
             var url = endpoint.StartsWith("http", StringComparison.OrdinalIgnoreCase)
                 ? endpoint
-                : endpoint.StartsWith("/")
-                    ? endpoint
-                    : "/" + endpoint;
+                : (endpoint.StartsWith("/") ? endpoint : "/" + endpoint);
 
             var json = JsonConvert.SerializeObject(payload);
             using var req = new HttpRequestMessage(HttpMethod.Post, url)
@@ -119,57 +131,62 @@ namespace PackVideoFix
             return content;
         }
 
-        public void Dispose()
-        {
-            _httpClient.Dispose();
-        }
+        public void Dispose() => _httpClient.Dispose();
     }
 
-    // ===== МОДЕЛИ =====
+    // ============================================================
+    // 🧩 DTO модели под новые API
+    // ============================================================
 
-    // (старый класс на /v2/postings/barcode пока оставляем, вдруг пригодится)
-    public class OzonPostingResponse
+    public sealed class OzonPostingBarcodeResponse
+    {
+        [JsonProperty("result")]
+        public List<OzonPostingBarcodeItem>? Result { get; set; }
+    }
+
+    public sealed class OzonPostingBarcodeItem
     {
         [JsonProperty("posting_number")]
         public string PostingNumber { get; set; } = "";
+
+        [JsonProperty("order_id")]
+        public long OrderId { get; set; }
     }
 
-    public sealed class FbsProductListResponse
+    public sealed class FbsPostingListResponse
     {
-        [JsonProperty("has_next")]
-        public bool HasNext { get; set; }
+        [JsonProperty("result")]
+        public FbsPostingListResult? Result { get; set; }
+    }
+
+    public sealed class FbsPostingListResult
+    {
+        [JsonProperty("postings")]
+        public List<FbsPostingShort>? Postings { get; set; }
+    }
+
+    public sealed class FbsPostingShort
+    {
+        [JsonProperty("posting_number")]
+        public string PostingNumber { get; set; } = "";
+
+        [JsonProperty("status")]
+        public string? Status { get; set; }
+
+        [JsonProperty("warehouse_name")]
+        public string? WarehouseName { get; set; }
 
         [JsonProperty("products")]
-        public System.Collections.Generic.List<FbsProductItem> Products { get; set; }
-            = new System.Collections.Generic.List<FbsProductItem>();
-
-        [JsonProperty("products_count")]
-        public int ProductsCount { get; set; }
+        public List<FbsProductShort>? Products { get; set; }
     }
 
-    public sealed class FbsProductItem
+    public sealed class FbsProductShort
     {
-        [JsonProperty("picture_url")]
-        public string PictureUrl { get; set; } = "";
-
-        [JsonProperty("postings")]
-        public System.Collections.Generic.List<FbsProductPosting> Postings { get; set; }
-            = new System.Collections.Generic.List<FbsProductPosting>();
-
-        [JsonProperty("product_name")]
-        public string ProductName { get; set; } = "";
-
-        [JsonProperty("quantity")]
-        public int Quantity { get; set; }
-
         [JsonProperty("sku")]
         public long Sku { get; set; }
-    }
 
-    public sealed class FbsProductPosting
-    {
-        [JsonProperty("posting_number")]
-        public string PostingNumber { get; set; } = "";
+        [JsonProperty("name")]
+        public string? Name { get; set; }
 
         [JsonProperty("quantity")]
         public int Quantity { get; set; }
