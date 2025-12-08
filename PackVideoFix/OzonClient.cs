@@ -1,4 +1,4 @@
-﻿// File: /mnt/data/OzonClient.cs
+﻿// File: OzonClient.cs  (горячий фикс под v3 product/info/list)
 using System;
 using System.Linq;
 using System.Net.Http;
@@ -41,7 +41,7 @@ namespace PackVideoFix
                 string? postingNumber = null;
                 long? firstSku = null;
 
-                // 1) Прямой метод (если доступен)
+                // 1) Прямой метод по штрихкоду (если доступен аккаунту)
                 try
                 {
                     var req1 = new { barcodes = new[] { barcode } };
@@ -55,7 +55,7 @@ namespace PackVideoFix
                 }
                 catch { /* у части продавцов метода нет — продолжаем */ }
 
-                // 2) Точный поиск: сканим packages[].barcodes[...] и прочие варианты
+                // 2) Поиск за последние 7 дней по списку постингов с баркодами
                 if (string.IsNullOrWhiteSpace(postingNumber))
                 {
                     var now = DateTime.UtcNow;
@@ -100,7 +100,7 @@ namespace PackVideoFix
                 if (string.IsNullOrWhiteSpace(postingNumber))
                     return (false, $"Отправление со штрихкодом {barcode} не найдено за последние 7 дней.", "", null);
 
-                // 3) Картинка по SKU
+                // 3) Картинка по SKU через v3 product/info/list
                 string? primaryImage = null;
                 if (firstSku.HasValue)
                     primaryImage = await TryGetPrimaryImageBySkusAsync(new[] { firstSku.Value }, ct);
@@ -175,24 +175,43 @@ namespace PackVideoFix
             }
         }
 
+        // >>> ИСПРАВЛЕНО: теперь v3 product/info/list и парсинг result.items
         private async Task<string?> TryGetPrimaryImageBySkusAsync(IEnumerable<long> skus, CancellationToken ct)
         {
             var ids = skus?.Distinct().ToArray() ?? Array.Empty<long>();
             if (ids.Length == 0) return null;
 
-            var req = new { product_id = ids };
             try
             {
-                var json = await SendAsync("/v2/product/info/list", req, ct);
-                var resp = JsonConvert.DeserializeObject<ProductInfoListResponse>(json);
-                var item = resp?.Result?.FirstOrDefault();
-                if (item == null) return null;
+                var json = await SendAsync("/v3/product/info/list", new { sku = ids }, ct);
+                var jo = JObject.Parse(json);
 
-                if (!string.IsNullOrWhiteSpace(item.PrimaryImage))
-                    return item.PrimaryImage;
+                var items = jo["result"]?["items"] as JArray
+                            ?? jo["items"] as JArray
+                            ?? new JArray();
 
-                if (item.Images != null && item.Images.Count > 0)
-                    return item.Images[0];
+                // Берём первое попавшееся изображение из primary_image или images[0]
+                foreach (var it in items)
+                {
+                    var pimg = it["primary_image"];
+                    if (pimg != null)
+                    {
+                        if (pimg.Type == JTokenType.String)
+                            return pimg.Value<string>();
+                        if (pimg is JArray pa && pa.Count > 0)
+                            return pa[0]!.Value<string>();
+                    }
+
+                    var imgs = it["images"] as JArray;
+                    if (imgs != null && imgs.Count > 0)
+                    {
+                        var x = imgs[0];
+                        if (x.Type == JTokenType.String) return x.Value<string>();
+                        if (x["url"] != null) return x["url"]!.Value<string>();
+                        if (x["default_url"] != null) return x["default_url"]!.Value<string>();
+                        if (x["image"] != null) return x["image"]!.Value<string>();
+                    }
+                }
 
                 return null;
             }
@@ -209,16 +228,29 @@ namespace PackVideoFix
             return (ok, msg, posting);
         }
 
+        // >>> Чуть безопаснее: дергаем доступный метод сборки, а не старые /v1 карточки
         public async Task<(bool Success, string Message)> TestConnectionAsync(CancellationToken ct)
         {
             try
             {
-                var json = await SendAsync("/v1/warehouse/list", new { }, ct);
+                var now = DateTime.UtcNow;
+                var body = new
+                {
+                    filter = new
+                    {
+                        cutoff_from = now.AddDays(-1).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+                        cutoff_to = now.AddMinutes(5).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+                    },
+                    limit = 1,
+                    offset = 0,
+                    sort_dir = "ASC"
+                };
+                var json = await SendAsync("/v1/assembly/fbs/product/list", body, ct);
                 return (true, "Подключение успешно. Ответ: " + json);
             }
             catch (Exception ex)
             {
-                return (false, "Ошибка при обращении к /v1/warehouse/list: " + ex.Message);
+                return (false, "Ошибка при обращении к /v1/assembly/fbs/product/list: " + ex.Message);
             }
         }
 
@@ -246,7 +278,7 @@ namespace PackVideoFix
         public void Dispose() => _httpClient.Dispose();
     }
 
-    // ================== DTO ==================
+    // ======= DTO (как в вашей рабочей версии) =======
     public sealed class OzonPostingBarcodeResponse
     {
         [JsonProperty("result")] public List<OzonPostingBarcodeItem>? Result { get; set; }
@@ -279,9 +311,7 @@ namespace PackVideoFix
         [JsonProperty("status")] public string? Status { get; set; }
         [JsonProperty("warehouse_name")] public string? WarehouseName { get; set; }
 
-        // Может быть объектом или массивом; читаем как JToken
-        [JsonProperty("barcodes")] public JToken? Barcodes { get; set; }
-
+        [JsonProperty("barcodes")] public JToken? Barcodes { get; set; } // объект/массив/строка
         [JsonProperty("packages")] public List<FbsPackage>? Packages { get; set; }
         [JsonProperty("products")] public List<FbsProductShort>? Products { get; set; }
     }
@@ -289,7 +319,7 @@ namespace PackVideoFix
     public sealed class FbsPackage
     {
         [JsonProperty("package_id")] public string? PackageId { get; set; }
-        [JsonProperty("barcodes")] public JToken? Barcodes { get; set; } // объект/массив/строка
+        [JsonProperty("barcodes")] public JToken? Barcodes { get; set; }
     }
 
     public sealed class FbsProductShort
@@ -300,6 +330,7 @@ namespace PackVideoFix
         [JsonProperty("barcode")] public string? Barcode { get; set; }
     }
 
+    // (Старые DTO для v2 оставил — не используются, но не мешают)
     public sealed class ProductInfoListResponse
     {
         [JsonProperty("result")] public List<ProductInfoItem>? Result { get; set; }
