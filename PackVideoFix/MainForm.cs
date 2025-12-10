@@ -5,11 +5,13 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
+using System.Linq;          // ← ДОБАВЬ ЭТУ СТРОКУ
 using System.Net.Http; // ⟵ для скачивания фото
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+
 
 namespace PackVideoFix;
 
@@ -20,15 +22,14 @@ public sealed class MainForm : Form
 
     // ---------- UI ----------
     private readonly PictureBox _preview;
-
     private readonly Label _lblPosting;
+    private readonly Panel _pnlImages;
     private readonly PictureBox _picProduct;
     private readonly Button _btnStopDelete;
 
     private readonly MenuStrip _menu;
     private readonly StatusStrip _statusStrip;
     private readonly ToolStripStatusLabel _statusLabel;
-
     private readonly SplitContainer _split;
 
     // ---------- SCANNER FILTER ----------
@@ -124,11 +125,17 @@ public sealed class MainForm : Form
 
         _picProduct = new PictureBox
         {
-            Dock = DockStyle.Top,
-            Height = 260,
-            SizeMode = PictureBoxSizeMode.Zoom,
+            SizeMode = PictureBoxSizeMode.Normal,
             BackColor = Color.WhiteSmoke
         };
+
+        _pnlImages = new Panel
+        {
+            Dock = DockStyle.Fill,
+            AutoScroll = true,
+            BackColor = Color.WhiteSmoke
+        };
+        _pnlImages.Controls.Add(_picProduct);
 
         _btnStopDelete = new Button
         {
@@ -146,9 +153,11 @@ public sealed class MainForm : Form
         SetStopButtonState(recording: false);
 
         var right = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
-        right.Controls.Add(_btnStopDelete);
-        right.Controls.Add(_picProduct);
-        right.Controls.Add(_lblPosting);
+        right.Controls.Add(_btnStopDelete);  // снизу
+        right.Controls.Add(_pnlImages);      // центр с автоскроллом
+        right.Controls.Add(_lblPosting);     // сверху
+
+
 
         _split = new SplitContainer { Dock = DockStyle.Fill };
         _split.Panel1.Controls.Add(_preview);
@@ -391,6 +400,7 @@ public sealed class MainForm : Form
 
     private async Task UpdateOzonInfoAsync(string barcode)
     {
+        // отменяем предыдущий незавершённый запрос к Ozon
         try { _ozonCts?.Cancel(); } catch { }
         try { _ozonCts?.Dispose(); } catch { }
         _ozonCts = new CancellationTokenSource();
@@ -407,45 +417,85 @@ public sealed class MainForm : Form
             return;
         }
 
-        // Новый вызов: номер + url главной картинки
-        var (ok, msg, posting, imgUrl) = await _ozon.TryGetPostingAndImageByBarcodeAsync(barcode, ct);
+        // Новый вызов: номер + список url картинок ВСЕХ товаров в отправлении
+        var (ok, msg, posting, imgUrls) = await _ozon.TryGetPostingAndImagesByBarcodeAsync(barcode, ct);
         if (ct.IsCancellationRequested) return;
 
-        if (ok && !string.IsNullOrWhiteSpace(posting))
-        {
-            _lblPosting.Text = $"Отправление: {posting}\nШтрихкод: {barcode}";
-
-            if (!string.IsNullOrWhiteSpace(imgUrl))
-            {
-                try
-                {
-                    using var http = new HttpClient(); // без ozon-хедеров, чтобы не ломать CDN
-                    var bytes = await http.GetByteArrayAsync(imgUrl, ct);
-                    if (ct.IsCancellationRequested) return;
-                    using var ms = new MemoryStream(bytes);
-                    var img = Image.FromStream(ms);
-                    SetProductImage((Image)img.Clone());
-                }
-                catch
-                {
-                    // намеренно тихо — картинка не критична
-                    SetProductImage(null);
-                }
-            }
-            else
-            {
-                SetProductImage(null);
-            }
-        }
-        else
+        if (!ok || string.IsNullOrWhiteSpace(posting))
         {
             _lblPosting.Text =
                 $"Отправление: —\n" +
                 $"Штрихкод: {barcode}\n" +
                 $"(Ozon: {msg})";
             SetProductImage(null);
+            return;
+        }
+
+        // Отправление нашли
+        _lblPosting.Text = $"Отправление: {posting}\nШтрихкод: {barcode}";
+
+        var totalItems = imgUrls?.Count ?? 0;
+        if (totalItems > 0)
+            _lblPosting.Text += $"\nТоваров в отправлении: {totalItems}";
+
+        if (imgUrls == null || imgUrls.Count == 0)
+        {
+            SetProductImage(null);
+            return;
+        }
+
+        try
+        {
+            using var http = new HttpClient(); // без ozon-хедеров, чтобы не ломать CDN
+
+            // группируем по URL, чтобы знать количество одинаковых товаров
+            var groups = imgUrls
+                .Where(u => !string.IsNullOrWhiteSpace(u))
+                .GroupBy(u => u, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var images = new List<Image>();
+            var counts = new List<int>();
+
+            const int maxGroups = 30; // максимум разных картинок на экране
+
+            for (int i = 0; i < groups.Count && i < maxGroups; i++)
+            {
+                var g = groups[i];
+                var url = g.Key;
+                var count = g.Count();
+
+                var bytes = await http.GetByteArrayAsync(url, ct);
+                if (ct.IsCancellationRequested) return;
+
+                using var ms = new MemoryStream(bytes);
+                using var img = Image.FromStream(ms);
+
+                images.Add((Image)img.Clone());
+                counts.Add(count);
+            }
+
+            if (images.Count > 0)
+            {
+                var collage = BuildImageGrid(images, counts);
+                SetProductImage(collage);
+            }
+            else
+            {
+                SetProductImage(null);
+            }
+
+            // исходные отдельные картинки больше не нужны
+            foreach (var img in images)
+                img.Dispose();
+        }
+        catch
+        {
+            // намеренно тихо — картинка не критична
+            SetProductImage(null);
         }
     }
+
 
     private static string Trim1Line(string s)
     {
@@ -454,12 +504,121 @@ public sealed class MainForm : Form
         return s.Length > 80 ? s.Substring(0, 80) + "…" : s;
     }
 
+    // Рисуем грид: 3 картинки в ряд, остальные — следующими рядами вниз.
+    // Ширина подстраивается под правую панель, высота — rows * cellHeight.
     private void SetProductImage(Image? img)
     {
         var old = _picProduct.Image;
         _picProduct.Image = img;
+
+        if (_pnlImages != null)
+        {
+            if (img != null)
+            {
+                _picProduct.SizeMode = PictureBoxSizeMode.Normal;
+                _picProduct.Size = img.Size;
+            }
+            else
+            {
+                _picProduct.Size = _pnlImages.ClientSize;
+            }
+        }
+
         old?.Dispose();
+
+        // При смене картинки возвращаем скролл в начало,
+        // чтобы первый ряд всегда был виден.
+        _pnlImages?.ScrollControlIntoView(_picProduct);
     }
+
+    /// <summary>
+    /// Строит сетку 3×N из картинок с цифрой количества в углу.
+    /// </summary>
+    private Image BuildImageGrid(IReadOnlyList<Image> images, IReadOnlyList<int> counts)
+    {
+        if (images == null || images.Count == 0)
+            throw new ArgumentException(nameof(images));
+
+        int columns = 3;
+        int padding = 5;
+
+        int panelWidth = _pnlImages?.ClientSize.Width ?? 320;
+        if (panelWidth < 100) panelWidth = 320;
+
+        int cellWidth = (panelWidth - padding * (columns + 1)) / columns;
+        if (cellWidth < 40) cellWidth = 40;
+        int cellHeight = cellWidth;
+
+        int n = images.Count;
+        int rows = (int)Math.Ceiling(n / (double)columns);
+
+        int totalHeight = rows * cellHeight + padding * (rows + 1);
+
+        var bmp = new Bitmap(panelWidth, totalHeight);
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.Clear(Color.White);
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+
+            for (int i = 0; i < n; i++)
+            {
+                int row = i / columns;
+                int col = i % columns;
+
+                int x = padding + col * (cellWidth + padding);
+                int y = padding + row * (cellHeight + padding);
+
+                var src = images[i];
+                if (src == null || src.Width <= 0 || src.Height <= 0)
+                    continue;
+
+                // Масштабируем, сохраняя пропорции, чтобы вписать в ячейку
+                float scale = Math.Min(
+                    (float)cellWidth / src.Width,
+                    (float)cellHeight / src.Height);
+
+                int w = Math.Max(1, (int)(src.Width * scale));
+                int h = Math.Max(1, (int)(src.Height * scale));
+
+                // Центруем картинку внутри ячейки
+                int dx = x + (cellWidth - w) / 2;
+                int dy = y + (cellHeight - h) / 2;
+
+                g.DrawImage(src, new Rectangle(dx, dy, w, h));
+
+                int count = (counts != null && i < counts.Count) ? counts[i] : 1;
+                if (count > 1)
+                {
+                    string txt = count.ToString();
+                    using var font = new Font("Segoe UI", 10, FontStyle.Bold);
+                    var size = g.MeasureString(txt, font);
+
+                    int boxW = (int)size.Width + 8;
+                    int boxH = (int)size.Height + 4;
+                    int bx = x + cellWidth - boxW - 2;  // привязка к ячейке, а не к самой картинке
+                    int by = y + cellHeight - boxH - 2;
+
+                    using (var brushBg = new SolidBrush(Color.FromArgb(200, Color.Black)))
+                        g.FillRectangle(brushBg, bx, by, boxW, boxH);
+
+                    using (var pen = new Pen(Color.White))
+                        g.DrawRectangle(pen, bx, by, boxW, boxH);
+
+                    using (var brushText = new SolidBrush(Color.White))
+                        g.DrawString(txt, font, brushText, bx + 4, by + 2);
+                }
+
+            }
+        }
+
+        return bmp;
+    }
+
+
+
+
+
 
     private void StartRecordingFlow_WithExistingCheck(string barcode)
     {

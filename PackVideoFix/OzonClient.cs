@@ -30,16 +30,23 @@ namespace PackVideoFix
         }
 
         public async Task<(bool Success, string Message, string PostingNumber, string? PrimaryImageUrl)>
-            TryGetPostingAndImageByBarcodeAsync(string barcode, CancellationToken ct)
+    TryGetPostingAndImageByBarcodeAsync(string barcode, CancellationToken ct)
+        {
+            var (ok, msg, posting, urls) = await TryGetPostingAndImagesByBarcodeAsync(barcode, ct);
+            return (ok, msg, posting, urls?.FirstOrDefault());
+        }
+
+        public async Task<(bool Success, string Message, string PostingNumber, IReadOnlyList<string> ImageUrls)>
+            TryGetPostingAndImagesByBarcodeAsync(string barcode, CancellationToken ct)
         {
             if (string.IsNullOrWhiteSpace(barcode))
-                return (false, "Пустой штрихкод.", "", null);
+                return (false, "Пустой штрихкод.", "", Array.Empty<string>());
 
             try
             {
                 barcode = barcode.Trim();
                 string? postingNumber = null;
-                long? firstSku = null;
+                var skus = new List<long>();
 
                 // 1) Прямой метод по штрихкоду (если доступен аккаунту)
                 try
@@ -53,7 +60,10 @@ namespace PackVideoFix
                     if (posting != null && !string.IsNullOrWhiteSpace(posting.PostingNumber))
                         postingNumber = posting.PostingNumber;
                 }
-                catch { /* у части продавцов метода нет — продолжаем */ }
+                catch
+                {
+                    // у части продавцов метода нет — продолжаем
+                }
 
                 // 2) Поиск за последние 7 дней по списку постингов с баркодами
                 if (string.IsNullOrWhiteSpace(postingNumber))
@@ -87,7 +97,21 @@ namespace PackVideoFix
                         if (hit != null)
                         {
                             postingNumber = hit.PostingNumber;
-                            firstSku = hit.Products?.FirstOrDefault()?.Sku;
+
+                            if (hit.Products != null)
+                            {
+                                foreach (var pr in hit.Products)
+                                {
+                                    if (pr == null || pr.Sku <= 0) continue;
+
+                                    // учитываем количество штук в отправлении
+                                    int qty = pr.Quantity > 0 ? pr.Quantity : 1;
+                                    for (int i = 0; i < qty; i++)
+                                        skus.Add(pr.Sku);
+                                }
+                            }
+
+
                             break;
                         }
 
@@ -98,20 +122,24 @@ namespace PackVideoFix
                 }
 
                 if (string.IsNullOrWhiteSpace(postingNumber))
-                    return (false, $"Отправление со штрихкодом {barcode} не найдено за последние 7 дней.", "", null);
+                    return (false, $"Отправление со штрихкодом {barcode} не найдено за последние 7 дней.", "", Array.Empty<string>());
 
-                // 3) Картинка по SKU через v3 product/info/list
-                string? primaryImage = null;
-                if (firstSku.HasValue)
-                    primaryImage = await TryGetPrimaryImageBySkusAsync(new[] { firstSku.Value }, ct);
+                // 3) Картинки по SKU через v3 product/info/list
+                IReadOnlyList<string> imageUrls = Array.Empty<string>();
+                if (skus.Count > 0)
+                {
+                    var urls = await TryGetImagesBySkusAsync(skus, ct);
+                    imageUrls = urls;
+                }
 
-                return (true, "OK", postingNumber!, primaryImage);
+                return (true, "OK", postingNumber!, imageUrls);
             }
             catch (Exception ex)
             {
-                return (false, "Ошибка при запросе к Ozon: " + ex.Message, "", null);
+                return (false, "Ошибка при запросе к Ozon: " + ex.Message, "", Array.Empty<string>());
             }
         }
+
 
         private static bool HasBarcode(FbsPostingShort p, string barcode)
         {
@@ -160,6 +188,7 @@ namespace PackVideoFix
                 case JTokenType.String:
                     yield return token.Value<string>()!;
                     yield break;
+
                 case JTokenType.Array:
                     foreach (var t in token.Children())
                         foreach (var s in EnumerateBarcodeStrings(t))
@@ -175,11 +204,15 @@ namespace PackVideoFix
             }
         }
 
-        // >>> ИСПРАВЛЕНО: теперь v3 product/info/list и парсинг result.items
-        private async Task<string?> TryGetPrimaryImageBySkusAsync(IEnumerable<long> skus, CancellationToken ct)
+        // Получить список URL главных картинок по набору SKU через /v3/product/info/list
+        private async Task<List<string>> TryGetImagesBySkusAsync(IEnumerable<long> skus, CancellationToken ct)
         {
-            var ids = skus?.Distinct().ToArray() ?? Array.Empty<long>();
-            if (ids.Length == 0) return null;
+            var skuList = skus?.ToList() ?? new List<long>();
+            if (skuList.Count == 0)
+                return new List<string>();
+
+            // для запроса в API достаточно уникальных значений
+            var ids = skuList.Distinct().ToArray();
 
             try
             {
@@ -190,36 +223,110 @@ namespace PackVideoFix
                             ?? jo["items"] as JArray
                             ?? new JArray();
 
-                // Берём первое попавшееся изображение из primary_image или images[0]
+                // по SKU → url
+                var urlBySku = new Dictionary<long, string>();
+                var fallbackUrls = new List<string>();
+
                 foreach (var it in items)
                 {
+                    if (it == null) continue;
+
+                    string? url = null;
+
+                    // 1) primary_image: строка или массив, берём только ПЕРВОЕ значение
                     var pimg = it["primary_image"];
                     if (pimg != null)
                     {
                         if (pimg.Type == JTokenType.String)
-                            return pimg.Value<string>();
-                        if (pimg is JArray pa && pa.Count > 0)
-                            return pa[0]!.Value<string>();
+                        {
+                            url = pimg.Value<string>();
+                        }
+                        else if (pimg is JArray pa && pa.Count > 0)
+                        {
+                            url = pa[0]!.Value<string>();
+                        }
                     }
 
-                    var imgs = it["images"] as JArray;
-                    if (imgs != null && imgs.Count > 0)
+                    // 2) если primary_image нет — берём ПЕРВУЮ картинку из images
+                    if (string.IsNullOrWhiteSpace(url))
                     {
-                        var x = imgs[0];
-                        if (x.Type == JTokenType.String) return x.Value<string>();
-                        if (x["url"] != null) return x["url"]!.Value<string>();
-                        if (x["default_url"] != null) return x["default_url"]!.Value<string>();
-                        if (x["image"] != null) return x["image"]!.Value<string>();
+                        var imgs = it["images"] as JArray;
+                        if (imgs != null && imgs.Count > 0)
+                        {
+                            var x = imgs[0];
+                            if (x.Type == JTokenType.String)
+                            {
+                                url = x.Value<string>();
+                            }
+                            else
+                            {
+                                if (x["url"] != null) url = x["url"]!.Value<string>();
+                                else if (x["default_url"] != null) url = x["default_url"]!.Value<string>();
+                                else if (x["image"] != null) url = x["image"]!.Value<string>();
+                            }
+                        }
+                    }
+
+                    if (string.IsNullOrWhiteSpace(url))
+                        continue;
+
+                    // пытаемся вытащить sku из ответа
+                    long? sku = it["sku"]?.Value<long?>()
+                                ?? it["product_id"]?.Value<long?>()
+                                ?? it["id"]?.Value<long?>();
+
+                    if (sku.HasValue)
+                    {
+                        // запомним только первую найденную картинку для SKU
+                        if (!urlBySku.ContainsKey(sku.Value))
+                            urlBySku[sku.Value] = url!;
+                    }
+                    else
+                    {
+                        // на всякий случай соберём "безымянные" url
+                        fallbackUrls.Add(url!);
                     }
                 }
 
-                return null;
+                // восстанавливаем список url в том же количестве и порядке,
+                // как входные skuList (с повторениями)
+                var result = new List<string>();
+
+                foreach (var sku in skuList)
+                {
+                    if (urlBySku.TryGetValue(sku, out var u) && !string.IsNullOrWhiteSpace(u))
+                    {
+                        result.Add(u);
+                    }
+                    else if (fallbackUrls.Count > 0)
+                    {
+                        // запасной вариант, если конкретный sku не нашли
+                        result.Add(fallbackUrls[0]);
+                    }
+                }
+
+                // небольшое ограничение на безумно большие посылки
+                if (result.Count > 50)
+                    result = result.Take(50).ToList();
+
+                return result;
             }
             catch
             {
-                return null;
+                // при ошибке просто вернём пустой список, чтобы не ронять весь поток
+                return new List<string>();
             }
         }
+
+
+
+        // Обёртка для совместимости: вернуть первую картинку
+        private async Task<string?> TryGetPrimaryImageBySkusAsync(IEnumerable<long> skus, CancellationToken ct)
+        {
+            var all = await TryGetImagesBySkusAsync(skus, ct);
+            return all.FirstOrDefault();
+        }
+
 
         public async Task<(bool Success, string Message, string PostingNumber)> TryGetPostingByBarcodeAsync(
             string barcode, CancellationToken ct)
