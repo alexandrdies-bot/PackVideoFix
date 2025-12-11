@@ -454,6 +454,26 @@ public sealed class MainForm : Form
                 .GroupBy(u => u, StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
+            // ----- РЕЖИМ ОДНОГО ТОВАРА -----
+            if (groups.Count == 1)
+            {
+                var g = groups[0];
+                var url = g.Key;
+                var count = g.Count(); // количество одинаковых товаров
+
+                var bytes = await http.GetByteArrayAsync(url, ct);
+                if (ct.IsCancellationRequested) return;
+
+                using var ms = new MemoryStream(bytes);
+                using var img = Image.FromStream(ms);
+
+                // если count > 1 — рисуем цифру в углу, иначе просто картинка
+                var big = BuildSingleImageWithCount(img, count > 1 ? count : 0);
+                SetProductImage(big);
+                return;
+            }
+
+            // ----- НЕСКОЛЬКО РАЗНЫХ ТОВАРОВ — ГРИД 3×N -----
             var images = new List<Image>();
             var counts = new List<int>();
 
@@ -489,6 +509,7 @@ public sealed class MainForm : Form
             foreach (var img in images)
                 img.Dispose();
         }
+
         catch
         {
             // намеренно тихо — картинка не критична
@@ -614,6 +635,76 @@ public sealed class MainForm : Form
 
         return bmp;
     }
+
+    /// <summary>
+    /// Одна большая картинка, вписанная в панель, с цифрой количества в правом нижнем углу (если count > 1).
+    /// </summary>
+    private Image BuildSingleImageWithCount(Image src, int count)
+    {
+        if (src == null)
+            throw new ArgumentNullException(nameof(src));
+
+        int panelWidth = _pnlImages?.ClientSize.Width ?? 380;
+        int panelHeight = _pnlImages?.ClientSize.Height ?? 400;
+        if (panelWidth < 50) panelWidth = 50;
+        if (panelHeight < 50) panelHeight = 50;
+
+        int padding = 10;
+        int maxWidth = Math.Max(10, panelWidth - padding * 2);
+        int maxHeight = Math.Max(10, panelHeight - padding * 2); // можно не использовать, оставим на будущее
+
+        // Масштабируем ТОЛЬКО по ширине, чтобы не "поджимать" по высоте.
+        // Если картинка уже уже панели — не увеличиваем, оставляем 1:1.
+        float scale = 1f;
+        if (src.Width > maxWidth)
+            scale = (float)maxWidth / src.Width;
+
+        int w = Math.Max(1, (int)(src.Width * scale));
+        int h = Math.Max(1, (int)(src.Height * scale));
+
+
+        // итоговый холст: не меньше панели по ширине и высоте
+        int bmpW = Math.Max(panelWidth, w + padding * 2);
+        int bmpH = Math.Max(panelHeight, h + padding * 2);
+
+        var bmp = new Bitmap(bmpW, bmpH);
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.Clear(Color.White);
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+
+            // центрируем картинку
+            int x = (bmpW - w) / 2;
+            int y = (bmpH - h) / 2;
+
+            g.DrawImage(src, new Rectangle(x, y, w, h));
+
+            if (count > 1)
+            {
+                string txt = count.ToString();
+                using var font = new Font("Segoe UI", 16, FontStyle.Bold);
+                var size = g.MeasureString(txt, font);
+
+                int boxW = (int)size.Width + 10;
+                int boxH = (int)size.Height + 6;
+                int bx = x + w - boxW - 4;
+                int by = y + h - boxH - 4;
+
+                using (var brushBg = new SolidBrush(Color.FromArgb(200, Color.Black)))
+                    g.FillRectangle(brushBg, bx, by, boxW, boxH);
+
+                using (var pen = new Pen(Color.White))
+                    g.DrawRectangle(pen, bx, by, boxW, boxH);
+
+                using (var brushText = new SolidBrush(Color.White))
+                    g.DrawString(txt, font, brushText, bx + 5, by + 3);
+            }
+        }
+
+        return bmp;
+    }
+
 
 
 

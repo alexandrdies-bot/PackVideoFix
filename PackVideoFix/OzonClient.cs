@@ -65,12 +65,13 @@ namespace PackVideoFix
                     // у части продавцов метода нет — продолжаем
                 }
 
-                // 2) Поиск за последние 7 дней по списку постингов с баркодами
+                // 2) Поиск за последние 30 дней по списку постингов с баркодами
                 if (string.IsNullOrWhiteSpace(postingNumber))
                 {
                     var now = DateTime.UtcNow;
-                    var since = now.AddDays(-7).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
+                    var since = now.AddDays(-30).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
                     var to = now.AddMinutes(5).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
+
 
                     int limit = 100, offset = 0, pages = 0;
                     while (true)
@@ -122,7 +123,7 @@ namespace PackVideoFix
                 }
 
                 if (string.IsNullOrWhiteSpace(postingNumber))
-                    return (false, $"Отправление со штрихкодом {barcode} не найдено за последние 7 дней.", "", Array.Empty<string>());
+                    return (false, $"Отправление со штрихкодом {barcode} не найдено за последние 30 дней.", "", Array.Empty<string>());
 
                 // 3) Картинки по SKU через v3 product/info/list
                 IReadOnlyList<string> imageUrls = Array.Empty<string>();
