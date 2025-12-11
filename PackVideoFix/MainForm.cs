@@ -22,15 +22,25 @@ public sealed class MainForm : Form
 
     // ---------- UI ----------
     private readonly PictureBox _preview;
-    private readonly Label _lblPosting;
-    private readonly Panel _pnlImages;
-    private readonly PictureBox _picProduct;
-    private readonly Button _btnStopDelete;
 
     private readonly MenuStrip _menu;
     private readonly StatusStrip _statusStrip;
     private readonly ToolStripStatusLabel _statusLabel;
     private readonly SplitContainer _split;
+
+    // верхний блок справа
+    private readonly Label _lblPosting;          // старый мультистрочный label для ошибок/служебных сообщений
+    private readonly TableLayoutPanel _postingLayout;
+    private readonly Label _lblPostingNumber;
+    private readonly Label _lblBarcode;
+    private readonly Label _lblStatus;
+    private readonly Label _lblItemsCount;
+
+    private readonly Panel _pnlImages;
+    private readonly PictureBox _picProduct;
+    private readonly Button _btnStopDelete;
+
+
 
     // ---------- SCANNER FILTER ----------
     private BarcodeMessageFilter? _scanFilter;
@@ -61,6 +71,10 @@ public sealed class MainForm : Form
         Text = "PackVideoFix — Упаковка";
         Width = 1300;
         Height = 820;
+
+        // современный системный шрифт, как в Windows 10/11
+        Font = new Font("Segoe UI", 10F, FontStyle.Regular);
+        StartPosition = FormStartPosition.CenterScreen;
 
         LoadConfig();
         RebuildOzonClient();
@@ -114,14 +128,81 @@ public sealed class MainForm : Form
         };
 
         // ----- Right side -----
-        _lblPosting = new Label
+        // Панель сверху для отправления/штрихкода/статуса/количества
+        var postingHeader = new Panel
         {
             Dock = DockStyle.Top,
             Height = 260,
-            Font = new Font("Segoe UI", 16, FontStyle.Bold),
-            Text = "Отправление: —\nТовар: —",
-            Padding = new Padding(10)
+            Padding = new Padding(10, 10, 10, 0)
         };
+
+        // Старый label для текстовых ошибок и служебных сообщений
+        _lblPosting = new Label
+        {
+            Dock = DockStyle.Fill,
+            Font = new Font("Segoe UI", 14, FontStyle.Bold),
+            Text = "Отправление: —\nШтрихкод: —",
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+
+        // Новая таблица 1×4 для «красивого» режима
+        _postingLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 4
+        };
+        // чуть подвигаем доли по высоте
+        _postingLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 28)); // номер
+        _postingLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 17)); // штрихкод
+        _postingLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 30)); // статус
+        _postingLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 25)); // количество
+
+        _lblPostingNumber = new Label
+        {
+            Dock = DockStyle.Fill,
+            Text = "—",
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = new Font("Segoe UI", 32f, FontStyle.Regular),
+            Margin = new Padding(0, 0, 0, 4)   // небольшой отступ вниз
+        };
+
+        _lblBarcode = new Label
+        {
+            Dock = DockStyle.Fill,
+            Text = "",
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = new Font("Segoe UI", 16f, FontStyle.Regular),
+            Margin = new Padding(0, 0, 0, 12)  // побольше отступ под штрихкодом
+        };
+
+        _lblStatus = new Label
+        {
+            Dock = DockStyle.Fill,
+            Text = "",
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = new Font("Segoe UI", 24f, FontStyle.Bold),
+            Margin = new Padding(0, 12, 0, 8)  // статус висит "сам по себе", как на образце
+        };
+
+        _lblItemsCount = new Label
+        {
+            Dock = DockStyle.Fill,
+            Text = "",
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = new Font("Segoe UI", 18f, FontStyle.Regular),
+            Margin = new Padding(0, 8, 0, 0)   // чуть отодвигаем от статуса
+        };
+
+
+        _postingLayout.Controls.Add(_lblPostingNumber, 0, 0);
+        _postingLayout.Controls.Add(_lblBarcode, 0, 1);
+        _postingLayout.Controls.Add(_lblStatus, 0, 2);
+        _postingLayout.Controls.Add(_lblItemsCount, 0, 3);
+
+        postingHeader.Controls.Add(_postingLayout);
+        postingHeader.Controls.Add(_lblPosting);
+        _lblPosting.Visible = false; // по умолчанию показываем красивый режим
 
         _picProduct = new PictureBox
         {
@@ -136,6 +217,7 @@ public sealed class MainForm : Form
             BackColor = Color.WhiteSmoke
         };
         _pnlImages.Controls.Add(_picProduct);
+
 
         _btnStopDelete = new Button
         {
@@ -155,11 +237,12 @@ public sealed class MainForm : Form
         var right = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
         right.Controls.Add(_btnStopDelete);  // снизу
         right.Controls.Add(_pnlImages);      // центр с автоскроллом
-        right.Controls.Add(_lblPosting);     // сверху
+        right.Controls.Add(postingHeader);   // сверху (таблица + старый label)
 
 
 
-        _split = new SplitContainer { Dock = DockStyle.Fill };
+
+                _split = new SplitContainer { Dock = DockStyle.Fill };
         _split.Panel1.Controls.Add(_preview);
         _split.Panel2.Controls.Add(right);
 
@@ -169,7 +252,10 @@ public sealed class MainForm : Form
                 FixSplitter(_split);
         };
 
+        _split.Panel2.Resize += (_, __) => AdjustPostingHeaderFonts();
+
         Controls.Add(_split);
+
 
         Shown += (_, __) =>
         {
@@ -216,6 +302,90 @@ public sealed class MainForm : Form
         {
             try { split.SplitterDistance = left; } catch { }
         }
+    }
+
+    private void ShowFancyPostingHeader(bool fancy)
+    {
+        // fancy = true  -> показываем 4 строки разными размерами
+        // fancy = false -> показываем только старый мультистрочный _lblPosting
+        if (_postingLayout != null)
+            _postingLayout.Visible = fancy;
+        if (_lblPosting != null)
+            _lblPosting.Visible = !fancy;
+    }
+
+    /// <summary>
+    /// Подбирает размер шрифта так, чтобы текст влез по ширине label.
+    /// Работает только по ширине (без учёта высоты).
+    /// </summary>
+    private void AdjustLabelFontToFit(Label label, int maxFontSize, int minFontSize)
+    {
+        if (label == null || label.Parent == null || string.IsNullOrEmpty(label.Text))
+            return;
+
+        // Если ширина ещё не посчитана (например, форма только создаётся) — выходим.
+        if (label.Width <= 0)
+            return;
+
+        float size = maxFontSize;
+        Font baseFont = label.Font;
+        Font bestFont = baseFont;
+
+        using (var g = label.CreateGraphics())
+        {
+            while (size >= minFontSize)
+            {
+                using (var testFont = new Font(baseFont.FontFamily, size, baseFont.Style))
+                {
+                    var textSize = TextRenderer.MeasureText(
+                      g,
+                      label.Text,
+                      testFont,
+                      new System.Drawing.Size(int.MaxValue, int.MaxValue),
+                      TextFormatFlags.SingleLine);
+
+
+                    if (textSize.Width <= label.Width - 4)
+                    {
+                        bestFont = (Font)testFont.Clone();
+                        break;
+                    }
+                }
+
+                size -= 1.0f;
+            }
+        }
+
+        label.Font = bestFont;
+    }
+
+    /// <summary>
+    /// Подгоняет размеры шрифтов всех заголовков справа
+    /// под текущую ширину панели.
+    /// </summary>
+    private void AdjustPostingHeaderFonts()
+    {
+        // Номер отправления
+        AdjustLabelFontToFit(_lblPostingNumber, 32, 16);
+
+        // Штрихкод
+        AdjustLabelFontToFit(_lblBarcode, 18, 10);
+
+        // Статус — только если он в одну строку (для "ОТМЕНЁН\nНЕ УПАКОВЫВАТЬ!" не трогаем)
+        if (!string.IsNullOrEmpty(_lblStatus.Text) && !_lblStatus.Text.Contains("\n"))
+            AdjustLabelFontToFit(_lblStatus, 26, 12);
+
+        // "Товаров в отправлении..."
+        AdjustLabelFontToFit(_lblItemsCount, 18, 10);
+    }
+
+    private void SetPostingHeaderColor(Color color)
+    {
+        _lblPosting.ForeColor = color;
+        _lblPostingNumber.ForeColor = color;
+        _lblBarcode.ForeColor = color;
+        _lblStatus.ForeColor = color;
+        _lblItemsCount.ForeColor = color;
     }
 
     // =========================
@@ -525,27 +695,39 @@ public sealed class MainForm : Form
         _ozonCts = new CancellationTokenSource();
         var ct = _ozonCts.Token;
 
-        _lblPosting.ForeColor = Color.Black;
-        _lblPosting.Text = $"Отправление: —\nШтрихкод: {barcode}";
+        SetPostingHeaderColor(Color.Black);
+        ShowFancyPostingHeader(true);
+
+        _lblPostingNumber.Text = "—";
+        _lblBarcode.Text = barcode;
+        _lblStatus.Text = "";
+        _lblItemsCount.Text = "";
+
+        _lblPosting.Text = $"Отправление: —\nШтрихкод: {barcode}"; // на всякий случай, для режима ошибок
         SetProductImage(null);
+
 
         if (_ozon == null)
         {
+            ShowFancyPostingHeader(false);
+            SetPostingHeaderColor(Color.Black);
             _lblPosting.Text =
                 "OZON НЕ НАСТРОЕН\n" +
                 $"barcode = {barcode}";
             return;
         }
 
+
         // Новый вызов: номер + список url картинок всех товаров в отправлении + статус
         var (ok, msg, posting, status, imgUrls) = await _ozon.TryGetPostingAndImagesByBarcodeAsync(barcode, ct);
         if (ct.IsCancellationRequested) return;
 
         // по умолчанию чёрный цвет, чтобы после отменённого заказа всё вернуть
-        _lblPosting.ForeColor = Color.Black;
+        SetPostingHeaderColor(Color.Black);
 
         if (!ok || string.IsNullOrWhiteSpace(posting))
         {
+            ShowFancyPostingHeader(false);
             _lblPosting.Text =
                 $"Отправление: —\n" +
                 $"Штрихкод: {barcode}\n" +
@@ -554,27 +736,57 @@ public sealed class MainForm : Form
             return;
         }
 
+
         // --- Отправление найдено ---
-        string text = $"Отправление: {posting}\nШтрихкод: {barcode}";
+        ShowFancyPostingHeader(true);
+
+        _lblPostingNumber.Text = posting;
+        _lblBarcode.Text = barcode;
+        _lblStatus.Text = "";
+        _lblItemsCount.Text = "";
 
         // по умолчанию запись разрешена
         bool canRecord = true;
 
-        // Добавляем строку статуса
+        // Добавляем строку статуса...
         if (!string.IsNullOrWhiteSpace(status))
         {
-            var prettyStatus = status.Replace('_', ' ');
             var sLower = status.Trim().ToLowerInvariant();
 
-            // Разрешаем запись ТОЛЬКО для статусов, начинающихся с "awaiting_"
-            // (awaiting_packaging, awaiting_deliver и т.п. — "готов к отгрузке").
-            canRecord = sLower.StartsWith("awaiting_");
+            // Статусы, при которых МОЖНО упаковывать
+            bool isAwaiting =
+                sLower.StartsWith("awaiting_")   // английские статусы
+                || sLower == "ожидает";          // иногда приходит по-русски
+
+            canRecord = isAwaiting;
+
+            // Текст статуса для экрана
+            string statusRu;
+
+            if (sLower == "cancelled")
+            {
+                // отдельный случай — отменён
+                statusRu = "ОТМЕНЁН";
+            }
+            else if (isAwaiting)
+            {
+                // ВСЕ статусы, при которых можно паковать, показываем одинаково
+                statusRu = "ГОТОВ К УПАКОВКЕ";
+            }
+            else
+            {
+                // всё остальное — через переводчик как есть
+                statusRu = TranslateOzonStatusToRussian(status);
+            }
+
+            // для красивого вида делаем ВЕРХНИЙ РЕГИСТР
+            statusRu = statusRu.ToUpperInvariant();
 
             if (sLower == "cancelled")
             {
                 // ЯВНОЕ предупреждение, что упаковывать нельзя
-                _lblPosting.ForeColor = Color.Red;
-                text += $"\nСТАТУС: ОТМЕНЁН ({prettyStatus}) — НЕ УПАКОВЫВАТЬ!";
+                SetPostingHeaderColor(Color.Red);
+                _lblStatus.Text = statusRu + "\nНЕ УПАКОВЫВАТЬ!";
                 try
                 {
                     System.Media.SystemSounds.Exclamation.Play();
@@ -583,21 +795,34 @@ public sealed class MainForm : Form
             }
             else
             {
-                if (canRecord)
+                SetPostingHeaderColor(Color.Black);
+                _lblStatus.Text = statusRu;
+
+                if (!canRecord)
                 {
-                    text += $"\nСтатус: {prettyStatus}";
-                }
-                else
-                {
-                    text += $"\nСтатус: {prettyStatus} (запись видео не требуется)";
+                    // пояснение отдельной строкой под статусом
+                    _lblStatus.Text += "\n(запись видео не требуется)";
                 }
             }
         }
+        else
+        {
+            SetPostingHeaderColor(Color.Black);
+        }
+
+
 
         if (imgUrls != null && imgUrls.Count > 0)
-            text += $"\nТоваров в отправлении: {imgUrls.Count}";
+        {
+            _lblItemsCount.Text = $"Товаров в отправлении: {imgUrls.Count}";
+        }
+        else
+        {
+            _lblItemsCount.Text = "";
+        }
 
-        _lblPosting.Text = text;
+        // Все тексты выставлены — подгоняем шрифты под текущую ширину
+        AdjustPostingHeaderFonts();
 
         // Если это вызов из сканера (первый скан) — решаем, начинать ли запись
         if (fromScanStart)
@@ -713,8 +938,37 @@ public sealed class MainForm : Form
         }
     }
 
+    private static string TranslateOzonStatusToRussian(string status)
+    {
+        if (string.IsNullOrWhiteSpace(status))
+            return "НЕИЗВЕСТЕН";
 
+        var s = status.Trim().ToLowerInvariant();
 
+        switch (s)
+        {
+            case "awaiting_packaging":
+            case "ожидает":
+                return "ГОТОВ К УПАКОВКЕ";
+
+            case "awaiting_deliver":
+            case "awaiting_delivery":
+            case "awaiting_deliver_pickup":
+                return "ОЖИДАЕТ ДОСТАВКУ";
+                            
+            case "awaiting_approve":
+                return "ОЖИДАЕТ ПОДТВЕРЖДЕНИЯ";
+            case "awaiting_verification":
+                return "ОЖИДАЕТ ПРОВЕРКИ";
+            case "delivered":
+                return "ДОСТАВЛЕН";
+            case "cancelled":
+                return "ОТМЕНЁН";
+            default:
+                return status.Replace('_', ' ');
+        }
+
+    }
 
     private static string Trim1Line(string s)
     {
