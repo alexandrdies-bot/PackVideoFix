@@ -367,36 +367,155 @@ public sealed class MainForm : Form
     // =========================
     private void HandleBarcode(string barcode)
     {
-        _ = UpdateOzonInfoAsync(barcode);
-
+        // Камера должна быть готова для записи
         if (_cap == null)
         {
             SetStatus("Камера ещё не готова.");
             return;
         }
 
-        bool shouldFinalize = false;
+        bool startNew = false;
+        bool finalizeCurrent = false;
+        bool needPrompt = false;
+        string? recordingBarcode = null;
 
         lock (_recLock)
         {
             if (!_isRecording)
             {
-                StartRecordingFlow_WithExistingCheck(barcode);
-                return;
+                // Ничего не пишется — первый скан -> старт новой записи
+                startNew = true;
             }
-
-            if (!string.Equals(_currentBarcode, barcode, StringComparison.OrdinalIgnoreCase))
+            else
             {
-                SetStatus($"Идёт запись {_currentBarcode}. Скан {barcode} игнорирован.");
-                return;
-            }
+                // Уже идёт запись
+                recordingBarcode = _currentBarcode;
 
-            shouldFinalize = true;
+                if (string.Equals(_currentBarcode, barcode, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Повторный скан того же штрихкода -> стоп записи и сохранение
+                    finalizeCurrent = true;
+                }
+                else
+                {
+                    // Во время записи отсканирован другой штрихкод -> спрашиваем оператора
+                    needPrompt = true;
+                }
+            }
         }
 
-        if (shouldFinalize)
+        // 1) Старт новой записи
+        if (startNew)
+        {
+            _ = UpdateOzonInfoAsync(barcode);              // грузим данные из Ozon под этот штрихкод
+            StartRecordingFlow_WithExistingCheck(barcode); // запускаем запись
+            return;
+        }
+
+        // 2) Стоп записи по повторному скану того же штрихкода
+        if (finalizeCurrent)
+        {
             StopAndFinalize("second-scan");
+            return;
+        }
+
+        // 3) Идёт запись для другого штрихкода — показываем диалог
+        if (needPrompt)
+        {
+            // true = "Завершить", false = "Продолжить"
+            bool finish = ShowRecordingConflictDialog(recordingBarcode ?? "?", barcode);
+
+            if (finish)
+            {
+                // Завершаем и УДАЛЯЕМ текущую запись
+                StopAndDelete("stop-from-other-barcode");
+                SetStatus("Текущая запись остановлена и удалена. Отсканируйте нужный штрихкод ещё раз.");
+            }
+            else
+            {
+                // Продолжаем текущую запись, новый штрихкод игнорируем
+                SetStatus($"Продолжается запись для {recordingBarcode}.");
+            }
+
+            return;
+        }
+
+        // На всякий случай — сюда попадать не должны
+        SetStatus("Неизвестное состояние записи при обработке штрихкода.");
     }
+
+    /// <summary>
+    /// Диалог "уже идёт запись".
+    /// true = пользователь выбрал "Завершить", false = "Продолжить".
+    /// </summary>
+    private bool ShowRecordingConflictDialog(string currentBarcode, string newBarcode)
+    {
+        using (var form = new Form())
+        {
+            form.Text = "Уже идёт запись";
+            form.FormBorderStyle = FormBorderStyle.FixedDialog;
+            form.StartPosition = FormStartPosition.CenterParent;
+            form.MaximizeBox = false;
+            form.MinimizeBox = false;
+            form.ShowInTaskbar = false;
+            form.ClientSize = new System.Drawing.Size(520, 240);
+
+            var lbl = new Label
+            {
+                AutoSize = false,
+                Dock = DockStyle.Fill,
+                TextAlign = System.Drawing.ContentAlignment.TopLeft,
+                Padding = new Padding(10),
+                Text =
+                    $"Сейчас уже идёт запись для штрихкода: {currentBarcode}.\n\n" +
+                    $"Новый штрихкод: {newBarcode}.\n\n" +
+                    "Нажмите \"Завершить\", чтобы остановить и удалить текущую запись.\n" +
+                    "После этого отсканируйте нужный штрихкод ещё раз.\n\n" +
+                    "Нажмите \"Продолжить\", чтобы игнорировать новый штрихкод и продолжить текущую запись."
+            };
+
+            var btnFinish = new Button
+            {
+                Text = "Завершить",
+                DialogResult = DialogResult.OK,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(5, 0, 0, 0)
+            };
+
+            var btnContinue = new Button
+            {
+                Text = "Продолжить",
+                DialogResult = DialogResult.Cancel,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(5, 0, 0, 0)
+            };
+
+            var panelButtons = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Bottom,
+                FlowDirection = FlowDirection.RightToLeft,
+                Height = 50,
+                Padding = new Padding(10),
+                AutoSize = false
+            };
+
+            panelButtons.Controls.Add(btnContinue);
+            panelButtons.Controls.Add(btnFinish);
+
+            form.Controls.Add(panelButtons);
+            form.Controls.Add(lbl);
+
+            form.AcceptButton = btnFinish;   // Enter = "Завершить"
+            form.CancelButton = btnContinue; // Esc = "Продолжить"
+
+            var result = form.ShowDialog(this);
+            return result == DialogResult.OK; // true = Завершить, false = Продолжить/закрыто
+        }
+    }
+
+
 
     private async Task UpdateOzonInfoAsync(string barcode)
     {
