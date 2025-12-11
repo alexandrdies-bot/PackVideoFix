@@ -20,9 +20,13 @@ public sealed class AppConfig
     // 0 = выключить, иначе авто-стоп по времени
     public int MaxClipSeconds { get; set; } = 0;
 
+    // Сколько месяцев хранить записи (0 = не удалять автоматически)
+    public int RetentionMonths { get; set; } = 3;
+
     // Ozon (пока только хранение)
     public string? OzonClientId { get; set; } = "";
     public string? OzonApiKey { get; set; } = "";
+
     public string? OzonBaseUrl { get; set; } = "https://api-seller.ozon.ru";
 
     public static AppConfig Default() => new();

@@ -404,13 +404,14 @@ public sealed class MainForm : Form
             }
         }
 
-        // 1) Старт новой записи
+        // 1) Старт новой записи (проверка статуса в Ozon)
         if (startNew)
         {
-            _ = UpdateOzonInfoAsync(barcode);              // грузим данные из Ozon под этот штрихкод
-            StartRecordingFlow_WithExistingCheck(barcode); // запускаем запись
+            // Внутри UpdateOzonInfoAsync решаем, можно ли начинать запись по статусу.
+            _ = UpdateOzonInfoAsync(barcode, fromScanStart: true);
             return;
         }
+
 
         // 2) Стоп записи по повторному скану того же штрихкода
         if (finalizeCurrent)
@@ -517,14 +518,14 @@ public sealed class MainForm : Form
 
 
 
-    private async Task UpdateOzonInfoAsync(string barcode)
+    private async Task UpdateOzonInfoAsync(string barcode, bool fromScanStart = false)
     {
-        // отменяем предыдущий незавершённый запрос к Ozon
         try { _ozonCts?.Cancel(); } catch { }
         try { _ozonCts?.Dispose(); } catch { }
         _ozonCts = new CancellationTokenSource();
         var ct = _ozonCts.Token;
 
+        _lblPosting.ForeColor = Color.Black;
         _lblPosting.Text = $"Отправление: —\nШтрихкод: {barcode}";
         SetProductImage(null);
 
@@ -536,9 +537,12 @@ public sealed class MainForm : Form
             return;
         }
 
-        // Новый вызов: номер + список url картинок ВСЕХ товаров в отправлении
-        var (ok, msg, posting, imgUrls) = await _ozon.TryGetPostingAndImagesByBarcodeAsync(barcode, ct);
+        // Новый вызов: номер + список url картинок всех товаров в отправлении + статус
+        var (ok, msg, posting, status, imgUrls) = await _ozon.TryGetPostingAndImagesByBarcodeAsync(barcode, ct);
         if (ct.IsCancellationRequested) return;
+
+        // по умолчанию чёрный цвет, чтобы после отменённого заказа всё вернуть
+        _lblPosting.ForeColor = Color.Black;
 
         if (!ok || string.IsNullOrWhiteSpace(posting))
         {
@@ -550,12 +554,76 @@ public sealed class MainForm : Form
             return;
         }
 
-        // Отправление нашли
-        _lblPosting.Text = $"Отправление: {posting}\nШтрихкод: {barcode}";
+        // --- Отправление найдено ---
+        string text = $"Отправление: {posting}\nШтрихкод: {barcode}";
 
-        var totalItems = imgUrls?.Count ?? 0;
-        if (totalItems > 0)
-            _lblPosting.Text += $"\nТоваров в отправлении: {totalItems}";
+        // по умолчанию запись разрешена
+        bool canRecord = true;
+
+        // Добавляем строку статуса
+        if (!string.IsNullOrWhiteSpace(status))
+        {
+            var prettyStatus = status.Replace('_', ' ');
+            var sLower = status.Trim().ToLowerInvariant();
+
+            // Разрешаем запись ТОЛЬКО для статусов, начинающихся с "awaiting_"
+            // (awaiting_packaging, awaiting_deliver и т.п. — "готов к отгрузке").
+            canRecord = sLower.StartsWith("awaiting_");
+
+            if (sLower == "cancelled")
+            {
+                // ЯВНОЕ предупреждение, что упаковывать нельзя
+                _lblPosting.ForeColor = Color.Red;
+                text += $"\nСТАТУС: ОТМЕНЁН ({prettyStatus}) — НЕ УПАКОВЫВАТЬ!";
+                try
+                {
+                    System.Media.SystemSounds.Exclamation.Play();
+                }
+                catch { /* звук не критичен */ }
+            }
+            else
+            {
+                if (canRecord)
+                {
+                    text += $"\nСтатус: {prettyStatus}";
+                }
+                else
+                {
+                    text += $"\nСтатус: {prettyStatus} (запись видео не требуется)";
+                }
+            }
+        }
+
+        if (imgUrls != null && imgUrls.Count > 0)
+            text += $"\nТоваров в отправлении: {imgUrls.Count}";
+
+        _lblPosting.Text = text;
+
+        // Если это вызов из сканера (первый скан) — решаем, начинать ли запись
+        if (fromScanStart)
+        {
+            bool shouldStart = false;
+
+            lock (_recLock)
+            {
+                // Запускаем запись только если сейчас ничего не пишется
+                // и статус разрешает упаковку (awaiting_*).
+                if (!_isRecording && canRecord)
+                    shouldStart = true;
+            }
+
+            if (shouldStart)
+            {
+                StartRecordingFlow_WithExistingCheck(barcode);
+            }
+            else if (!canRecord)
+            {
+                // Статус не "готов к отгрузке" — запись не начинаем
+                SetStatus("Запись не начата: статус отправления не позволяет упаковку.");
+            }
+        }
+
+
 
         if (imgUrls == null || imgUrls.Count == 0)
         {
@@ -567,11 +635,21 @@ public sealed class MainForm : Form
         {
             using var http = new HttpClient(); // без ozon-хедеров, чтобы не ломать CDN
 
-            // группируем по URL, чтобы знать количество одинаковых товаров
+            // группируем по URL, чтобы понять, сколько одинаковых товаров
             var groups = imgUrls
                 .Where(u => !string.IsNullOrWhiteSpace(u))
                 .GroupBy(u => u, StringComparer.OrdinalIgnoreCase)
                 .ToList();
+
+            if (groups.Count == 0)
+            {
+                SetProductImage(null);
+                return;
+            }
+
+            // дальше оставляем твой код: режим одного товара / грид 3×N
+            // ...
+
 
             // ----- РЕЖИМ ОДНОГО ТОВАРА -----
             if (groups.Count == 1)
@@ -628,13 +706,14 @@ public sealed class MainForm : Form
             foreach (var img in images)
                 img.Dispose();
         }
-
         catch
         {
             // намеренно тихо — картинка не критична
             SetProductImage(null);
         }
     }
+
+
 
 
     private static string Trim1Line(string s)

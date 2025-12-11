@@ -32,20 +32,22 @@ namespace PackVideoFix
         public async Task<(bool Success, string Message, string PostingNumber, string? PrimaryImageUrl)>
     TryGetPostingAndImageByBarcodeAsync(string barcode, CancellationToken ct)
         {
-            var (ok, msg, posting, urls) = await TryGetPostingAndImagesByBarcodeAsync(barcode, ct);
+            var (ok, msg, posting, status, urls) = await TryGetPostingAndImagesByBarcodeAsync(barcode, ct);
+            // статус здесь нам не нужен, поэтому просто игнорируем его
             return (ok, msg, posting, urls?.FirstOrDefault());
         }
 
-        public async Task<(bool Success, string Message, string PostingNumber, IReadOnlyList<string> ImageUrls)>
-            TryGetPostingAndImagesByBarcodeAsync(string barcode, CancellationToken ct)
+        public async Task<(bool Success, string Message, string PostingNumber, string? Status, IReadOnlyList<string> ImageUrls)>
+    TryGetPostingAndImagesByBarcodeAsync(string barcode, CancellationToken ct)
         {
             if (string.IsNullOrWhiteSpace(barcode))
-                return (false, "Пустой штрихкод.", "", Array.Empty<string>());
+                return (false, "Пустой штрихкод.", "", null, Array.Empty<string>());
 
             try
             {
                 barcode = barcode.Trim();
                 string? postingNumber = null;
+                string? postingStatus = null;
                 var skus = new List<long>();
 
                 // 1) Прямой метод по штрихкоду (если доступен аккаунту)
@@ -72,7 +74,6 @@ namespace PackVideoFix
                     var since = now.AddDays(-30).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
                     var to = now.AddMinutes(5).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
 
-
                     int limit = 100, offset = 0, pages = 0;
                     while (true)
                     {
@@ -98,6 +99,7 @@ namespace PackVideoFix
                         if (hit != null)
                         {
                             postingNumber = hit.PostingNumber;
+                            postingStatus = hit.Status;
 
                             if (hit.Products != null)
                             {
@@ -112,7 +114,6 @@ namespace PackVideoFix
                                 }
                             }
 
-
                             break;
                         }
 
@@ -123,7 +124,7 @@ namespace PackVideoFix
                 }
 
                 if (string.IsNullOrWhiteSpace(postingNumber))
-                    return (false, $"Отправление со штрихкодом {barcode} не найдено за последние 30 дней.", "", Array.Empty<string>());
+                    return (false, $"Отправление со штрихкодом {barcode} не найдено за последние 30 дней.", "", null, Array.Empty<string>());
 
                 // 3) Картинки по SKU через v3 product/info/list
                 IReadOnlyList<string> imageUrls = Array.Empty<string>();
@@ -133,13 +134,14 @@ namespace PackVideoFix
                     imageUrls = urls;
                 }
 
-                return (true, "OK", postingNumber!, imageUrls);
+                return (true, "OK", postingNumber!, postingStatus, imageUrls);
             }
             catch (Exception ex)
             {
-                return (false, "Ошибка при запросе к Ozon: " + ex.Message, "", Array.Empty<string>());
+                return (false, "Ошибка при запросе к Ozon: " + ex.Message, "", null, Array.Empty<string>());
             }
         }
+
 
 
         private static bool HasBarcode(FbsPostingShort p, string barcode)

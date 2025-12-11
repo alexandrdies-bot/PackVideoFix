@@ -14,7 +14,8 @@ public partial class SettingsForm : Form
     private readonly TextBox _tbStation;
     private readonly NumericUpDown _nudCamIndex;
     private readonly NumericUpDown _nudMaxSeconds;
-
+    private readonly NumericUpDown _nudRetentionMonths;
+         
     private readonly TextBox _tbOzonClientId;
     private readonly TextBox _tbOzonApiKey;
 
@@ -71,28 +72,59 @@ public partial class SettingsForm : Form
         root.Controls.Add(_nudCamIndex, 1, 3);
         root.Controls.Add(new Label(), 2, 3);
 
-        // MaxClipSeconds
-        root.Controls.Add(MkLabel("Авто-стоп (сек, 0=выкл):"), 0, 4);
-        _nudMaxSeconds = new NumericUpDown { Dock = DockStyle.Left, Width = 120, Minimum = 0, Maximum = 24 * 3600, Value = _cfg.MaxClipSeconds };
-        root.Controls.Add(_nudMaxSeconds, 1, 4);
+        // Хранить записи (мес, 0 = всегда)
+        root.Controls.Add(MkLabel("Хранить записи (мес, 0 = всегда):"), 0, 4);
+        _nudRetentionMonths = new NumericUpDown
+        {
+            Dock = DockStyle.Left,
+            Width = 120,
+            Minimum = 0,
+            Maximum = 36,
+            Value = Math.Max(0, Math.Min(_cfg.RetentionMonths, 36))
+        };
+        root.Controls.Add(_nudRetentionMonths, 1, 4);
         root.Controls.Add(new Label(), 2, 4);
 
-        // Ozon header
+        // Авто-стоп (сек, 0=выкл)
+        root.Controls.Add(MkLabel("Авто-стоп (сек, 0=выкл):"), 0, 5);
+        _nudMaxSeconds = new NumericUpDown
+        {
+            Dock = DockStyle.Left,
+            Width = 120,
+            Minimum = 0,
+            Maximum = 24 * 3600,
+            Value = _cfg.MaxClipSeconds,
+        };
+        root.Controls.Add(_nudMaxSeconds, 1, 5);
+        root.Controls.Add(new Label(), 2, 5);
+
+        // Ozon API ...
         var header = MkHeader("Ozon API (ключи храним в настройках)");
-        root.Controls.Add(header, 0, 5);
+        root.Controls.Add(header, 0, 6);
         root.SetColumnSpan(header, 3);
 
-        // Ozon ClientId
-        root.Controls.Add(MkLabel("Ozon Client-Id:"), 0, 6);
-        _tbOzonClientId = new TextBox { Dock = DockStyle.Fill, Text = _cfg.OzonClientId ?? "" };
-        root.Controls.Add(_tbOzonClientId, 1, 6);
-        root.Controls.Add(new Label(), 2, 6);
-
-        // Ozon ApiKey
-        root.Controls.Add(MkLabel("Ozon API Key:"), 0, 7);
-        _tbOzonApiKey = new TextBox { Dock = DockStyle.Fill, UseSystemPasswordChar = true, Text = _cfg.OzonApiKey ?? "" };
-        root.Controls.Add(_tbOzonApiKey, 1, 7);
+        // Ozon Client-Id
+        root.Controls.Add(MkLabel("Ozon Client-Id:"), 0, 7);
+        _tbOzonClientId = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Text = _cfg.OzonClientId ?? ""
+        };
+        root.Controls.Add(_tbOzonClientId, 1, 7);
         root.Controls.Add(new Label(), 2, 7);
+
+        // Ozon API Key
+        root.Controls.Add(MkLabel("Ozon API Key:"), 0, 8);
+        _tbOzonApiKey = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            UseSystemPasswordChar = true,
+            Text = _cfg.OzonApiKey ?? ""
+        };
+        root.Controls.Add(_tbOzonApiKey, 1, 8);
+        root.Controls.Add(new Label(), 2, 8);
+
+
 
         // Buttons
         var pnlBtns = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Height = 48 };
@@ -190,6 +222,7 @@ public partial class SettingsForm : Form
 
         _cfg.CameraIndex = (int)_nudCamIndex.Value;
         _cfg.MaxClipSeconds = (int)_nudMaxSeconds.Value;
+        _cfg.RetentionMonths = (int)_nudRetentionMonths.Value;
 
         _cfg.OzonClientId = (_tbOzonClientId.Text ?? "").Trim();
         _cfg.OzonApiKey = (_tbOzonApiKey.Text ?? "").Trim();
@@ -220,10 +253,12 @@ public partial class SettingsForm : Form
         StationName = src.StationName,
         CameraIndex = src.CameraIndex,
         MaxClipSeconds = src.MaxClipSeconds,
+        RetentionMonths = src.RetentionMonths,
         OzonClientId = src.OzonClientId,
         OzonApiKey = src.OzonApiKey,
         OzonBaseUrl = src.OzonBaseUrl
     };
+
     private async void TestConnectionButton_Click(object? sender, EventArgs e)
     {
         var clientId = _tbOzonClientId.Text.Trim();
