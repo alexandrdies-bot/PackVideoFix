@@ -11,6 +11,8 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Drawing.Drawing2D;
+
 
 
 namespace PackVideoFix;
@@ -75,6 +77,10 @@ public sealed class MainForm : Form
         // современный системный шрифт, как в Windows 10/11
         Font = new Font("Segoe UI", 10F, FontStyle.Regular);
         StartPosition = FormStartPosition.CenterScreen;
+
+        // Тёмная тема: общий фон и базовый цвет текста
+        this.BackColor = Color.FromArgb(0x18, 0x18, 0x1A); // #18181A
+        this.ForeColor = Color.Gainsboro;
 
         LoadConfig();
         RebuildOzonClient();
@@ -207,15 +213,16 @@ public sealed class MainForm : Form
         _picProduct = new PictureBox
         {
             SizeMode = PictureBoxSizeMode.Normal,
-            BackColor = Color.WhiteSmoke
+            BackColor = Color.FromArgb(24, 24, 26)  // тёмный, как вся тема
         };
 
         _pnlImages = new Panel
         {
             Dock = DockStyle.Fill,
             AutoScroll = true,
-            BackColor = Color.WhiteSmoke
+            BackColor = Color.FromArgb(0x20, 0x20, 0x24)  // тот же фон, что и rightCard
         };
+
         _pnlImages.Controls.Add(_picProduct);
 
 
@@ -234,17 +241,28 @@ public sealed class MainForm : Form
         _btnStopDelete.Click += (_, __) => StopAndDelete("manual-stop-delete");
         SetStopButtonState(recording: false);
 
+        // Правая часть: панель с заголовками, картинками и кнопкой
         var right = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
         right.Controls.Add(_btnStopDelete);  // снизу
         right.Controls.Add(_pnlImages);      // центр с автоскроллом
         right.Controls.Add(postingHeader);   // сверху (таблица + старый label)
 
-
-
-
-                _split = new SplitContainer { Dock = DockStyle.Fill };
+        // SplitContainer: слева превью камеры, справа — "карточка"
+        _split = new SplitContainer { Dock = DockStyle.Fill };
         _split.Panel1.Controls.Add(_preview);
-        _split.Panel2.Controls.Add(right);
+
+        // Карточка справа: отдельная панель с отступами и чуть более светлым фоном
+        var rightCard = new Panel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(24),
+            BackColor = Color.FromArgb(0x20, 0x20, 0x24) // немного светлее #18181A
+        };
+        rightCard.Controls.Add(right);
+
+        // Фон под карточкой
+        _split.Panel2.BackColor = Color.FromArgb(0x18, 0x18, 0x1A);
+        _split.Panel2.Controls.Add(rightCard);
 
         _split.SizeChanged += (_, __) =>
         {
@@ -255,6 +273,7 @@ public sealed class MainForm : Form
         _split.Panel2.Resize += (_, __) => AdjustPostingHeaderFonts();
 
         Controls.Add(_split);
+
 
 
         Shown += (_, __) =>
@@ -695,8 +714,9 @@ public sealed class MainForm : Form
         _ozonCts = new CancellationTokenSource();
         var ct = _ozonCts.Token;
 
-        SetPostingHeaderColor(Color.Black);
+        SetPostingHeaderColor(Color.Gainsboro);
         ShowFancyPostingHeader(true);
+
 
         _lblPostingNumber.Text = "—";
         _lblBarcode.Text = barcode;
@@ -710,7 +730,7 @@ public sealed class MainForm : Form
         if (_ozon == null)
         {
             ShowFancyPostingHeader(false);
-            SetPostingHeaderColor(Color.Black);
+            SetPostingHeaderColor(Color.Gainsboro);
             _lblPosting.Text =
                 "OZON НЕ НАСТРОЕН\n" +
                 $"barcode = {barcode}";
@@ -722,8 +742,9 @@ public sealed class MainForm : Form
         var (ok, msg, posting, status, imgUrls) = await _ozon.TryGetPostingAndImagesByBarcodeAsync(barcode, ct);
         if (ct.IsCancellationRequested) return;
 
-        // по умолчанию чёрный цвет, чтобы после отменённого заказа всё вернуть
-        SetPostingHeaderColor(Color.Black);
+        // по умолчанию светлый цвет, чтобы после отменённого заказа всё вернуть
+        SetPostingHeaderColor(Color.Gainsboro);
+
 
         if (!ok || string.IsNullOrWhiteSpace(posting))
         {
@@ -795,7 +816,7 @@ public sealed class MainForm : Form
             }
             else
             {
-                SetPostingHeaderColor(Color.Black);
+                SetPostingHeaderColor(Color.Gainsboro);
                 _lblStatus.Text = statusRu;
 
                 if (!canRecord)
@@ -807,7 +828,7 @@ public sealed class MainForm : Form
         }
         else
         {
-            SetPostingHeaderColor(Color.Black);
+            SetPostingHeaderColor(Color.Gainsboro);
         }
 
 
@@ -1004,8 +1025,36 @@ public sealed class MainForm : Form
         _pnlImages?.ScrollControlIntoView(_picProduct);
     }
 
+    private static GraphicsPath CreateRoundedRect(Rectangle rect, int radius)
+    {
+        var path = new GraphicsPath();
+
+        int d = radius * 2;
+        var arc = new Rectangle(rect.Location, new System.Drawing.Size(d, d));
+
+
+        // левый верх
+        path.AddArc(arc, 180, 90);
+
+        // правый верх
+        arc.X = rect.Right - d;
+        path.AddArc(arc, 270, 90);
+
+        // правый низ
+        arc.Y = rect.Bottom - d;
+        path.AddArc(arc, 0, 90);
+
+        // левый низ
+        arc.X = rect.Left;
+        path.AddArc(arc, 90, 90);
+
+        path.CloseFigure();
+        return path;
+    }
+
     /// <summary>
-    /// Строит сетку 3×N из картинок с цифрой количества в углу.
+    /// Строит сетку 3×N из «карточек»:
+    /// тёмный фон, белая карточка с рамкой, внутри картинка и счётчик.
     /// </summary>
     private Image BuildImageGrid(IReadOnlyList<Image> images, IReadOnlyList<int> counts)
     {
@@ -1013,14 +1062,23 @@ public sealed class MainForm : Form
             throw new ArgumentException(nameof(images));
 
         int columns = 3;
-        int padding = 5;
+        int padding = 10;              // расстояние между карточками
+        int cardPadding = 12;          // отступ картинки внутри карточки
+        int borderThickness = 4;       // толщина белой рамки
 
-        int panelWidth = _pnlImages?.ClientSize.Width ?? 320;
-        if (panelWidth < 100) panelWidth = 320;
+        // 1. Берём текущую ширину панели справа
+        int rawWidth = _pnlImages?.ClientSize.Width ?? 320;
+        if (rawWidth < 120) rawWidth = 320;
 
+        // 2. Делаем запас под вертикальный скролл, если он появится
+        int scrollReserve = SystemInformation.VerticalScrollBarWidth + 4;
+        int panelWidth = rawWidth - scrollReserve;
+        if (panelWidth < 120) panelWidth = 120;
+
+        // 3. Ширина / высота ячейки (карточки)
         int cellWidth = (panelWidth - padding * (columns + 1)) / columns;
-        if (cellWidth < 40) cellWidth = 40;
-        int cellHeight = cellWidth;
+        if (cellWidth < 80) cellWidth = 80;
+        int cellHeight = cellWidth * 4 / 3; // чуть вытянутые карточки
 
         int n = images.Count;
         int rows = (int)Math.Ceiling(n / (double)columns);
@@ -1030,9 +1088,10 @@ public sealed class MainForm : Form
         var bmp = new Bitmap(panelWidth, totalHeight);
         using (var g = Graphics.FromImage(bmp))
         {
-            g.Clear(Color.White);
-            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            var bg = _pnlImages?.BackColor ?? this.BackColor;
+            g.Clear(bg);
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
 
             for (int i = 0; i < n; i++)
             {
@@ -1046,20 +1105,40 @@ public sealed class MainForm : Form
                 if (src == null || src.Width <= 0 || src.Height <= 0)
                     continue;
 
-                // Масштабируем, сохраняя пропорции, чтобы вписать в ячейку
+                // прямоугольник карточки
+                var cardRect = new Rectangle(x, y, cellWidth, cellHeight);
+
+                // белая карточка с рамкой
+                using (var cardBrush = new SolidBrush(Color.White))
+                using (var cardPen = new Pen(Color.White, borderThickness))
+                {
+                    g.FillRectangle(cardBrush, cardRect);
+                    g.DrawRectangle(cardPen, cardRect);
+                }
+
+                // внутренняя область для картинки
+                var innerRect = Rectangle.Inflate(
+                    cardRect,
+                    -cardPadding - borderThickness,
+                    -cardPadding - borderThickness);
+
+                if (innerRect.Width <= 0 || innerRect.Height <= 0)
+                    continue;
+
+                // масштабируем картинку с сохранением пропорций
                 float scale = Math.Min(
-                    (float)cellWidth / src.Width,
-                    (float)cellHeight / src.Height);
+                    (float)innerRect.Width / src.Width,
+                    (float)innerRect.Height / src.Height);
 
                 int w = Math.Max(1, (int)(src.Width * scale));
                 int h = Math.Max(1, (int)(src.Height * scale));
 
-                // Центруем картинку внутри ячейки
-                int dx = x + (cellWidth - w) / 2;
-                int dy = y + (cellHeight - h) / 2;
+                int dx = innerRect.X + (innerRect.Width - w) / 2;
+                int dy = innerRect.Y + (innerRect.Height - h) / 2;
 
                 g.DrawImage(src, new Rectangle(dx, dy, w, h));
 
+                // счётчик количества в правом нижнем углу карточки
                 int count = (counts != null && i < counts.Count) ? counts[i] : 1;
                 if (count > 1)
                 {
@@ -1069,27 +1148,29 @@ public sealed class MainForm : Form
 
                     int boxW = (int)size.Width + 8;
                     int boxH = (int)size.Height + 4;
-                    int bx = x + cellWidth - boxW - 2;  // привязка к ячейке, а не к самой картинке
-                    int by = y + cellHeight - boxH - 2;
+                    int bx = cardRect.Right - boxW - 6;
+                    int by = cardRect.Bottom - boxH - 6;
 
-                    using (var brushBg = new SolidBrush(Color.FromArgb(200, Color.Black)))
+                    using (var brushBg = new SolidBrush(Color.FromArgb(220, Color.Black)))
                         g.FillRectangle(brushBg, bx, by, boxW, boxH);
 
-                    using (var pen = new Pen(Color.White))
-                        g.DrawRectangle(pen, bx, by, boxW, boxH);
-
-                    using (var brushText = new SolidBrush(Color.White))
-                        g.DrawString(txt, font, brushText, bx + 4, by + 2);
+                    using (var brushFg = new SolidBrush(Color.White))
+                        g.DrawString(txt, font, brushFg, bx + 4, by + 2);
                 }
-
             }
         }
 
         return bmp;
     }
 
+
+
+
+
+
     /// <summary>
-    /// Одна большая картинка, вписанная в панель, с цифрой количества в правом нижнем углу (если count > 1).
+    /// Одна картинка в «карточке» как у миниатюр, только крупная.
+    /// Тёмный фон, белая карточка с прямыми углами и счётчиком.
     /// </summary>
     private Image BuildSingleImageWithCount(Image src, int count)
     {
@@ -1101,63 +1182,101 @@ public sealed class MainForm : Form
         if (panelWidth < 50) panelWidth = 50;
         if (panelHeight < 50) panelHeight = 50;
 
-        int padding = 10;
-        int maxWidth = Math.Max(10, panelWidth - padding * 2);
-        int maxHeight = Math.Max(10, panelHeight - padding * 2); // можно не использовать, оставим на будущее
-
-        // Масштабируем ТОЛЬКО по ширине, чтобы не "поджимать" по высоте.
-        // Если картинка уже уже панели — не увеличиваем, оставляем 1:1.
-        float scale = 1f;
-        if (src.Width > maxWidth)
-            scale = (float)maxWidth / src.Width;
-
-        int w = Math.Max(1, (int)(src.Width * scale));
-        int h = Math.Max(1, (int)(src.Height * scale));
-
-
-        // итоговый холст: не меньше панели по ширине и высоте
-        int bmpW = Math.Max(panelWidth, w + padding * 2);
-        int bmpH = Math.Max(panelHeight, h + padding * 2);
-
-        var bmp = new Bitmap(bmpW, bmpH);
+        var bmp = new Bitmap(panelWidth, panelHeight);
         using (var g = Graphics.FromImage(bmp))
         {
-            g.Clear(Color.White);
-            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            // фон такой же, как в BuildImageGrid
+            var bg = _pnlImages?.BackColor ?? this.BackColor;
+            g.Clear(bg);
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.SmoothingMode = SmoothingMode.HighQuality;
 
-            // центрируем картинку
-            int x = (bmpW - w) / 2;
-            int y = (bmpH - h) / 2;
+            // параметры карточки (по смыслу как в гриде)
+            int paddingOuter = 24;  // отступ от панели до карточки
+            int cardPadding = 16;  // отступ картинки от рамки
+            int borderThickness = 4;  // толщина белой рамки
 
-            g.DrawImage(src, new Rectangle(x, y, w, h));
+            // максимальный размер карточки
+            int maxCardW = panelWidth - paddingOuter * 2;
+            int maxCardH = panelHeight - paddingOuter * 2;
 
+            // соотношение сторон такое же, как в гриде (4:3 по высоте)
+            const float cardAspect = 4f / 3f; // height / width
+
+            int cardW = maxCardW;
+            int cardH = (int)(cardW * cardAspect);
+            if (cardH > maxCardH)
+            {
+                cardH = maxCardH;
+                cardW = (int)(cardH / cardAspect);
+            }
+
+            // центрируем карточку
+            var cardRect = new Rectangle(
+                x: (panelWidth - cardW) / 2,
+                y: (panelHeight - cardH) / 2,
+                width: cardW,
+                height: cardH);
+
+            // лёгкая тень под карточкой
+            var shadowRect = Rectangle.Inflate(cardRect, 4, 5);
+            using (var shadowBrush = new SolidBrush(Color.FromArgb(80, 0, 0, 0)))
+                g.FillRectangle(shadowBrush, shadowRect);
+
+            // белая карточка с ПРЯМЫМИ углами
+            using (var cardBrush = new SolidBrush(Color.White))
+            using (var cardPen = new Pen(Color.White, borderThickness))
+            {
+                g.FillRectangle(cardBrush, cardRect);
+                g.DrawRectangle(cardPen, cardRect);
+            }
+
+            // внутренняя область под картинку
+            var innerRect = Rectangle.Inflate(
+                cardRect,
+                -cardPadding - borderThickness,
+                -cardPadding - borderThickness);
+
+            if (innerRect.Width > 0 && innerRect.Height > 0)
+            {
+                float imgScale = Math.Min(
+                    (float)innerRect.Width / src.Width,
+                    (float)innerRect.Height / src.Height);
+
+                int w2 = Math.Max(1, (int)(src.Width * imgScale));
+                int h2 = Math.Max(1, (int)(src.Height * imgScale));
+
+                int dx = innerRect.X + (innerRect.Width - w2) / 2;
+                int dy = innerRect.Y + (innerRect.Height - h2) / 2;
+
+                g.DrawImage(src, new Rectangle(dx, dy, w2, h2));
+            }
+
+            // счётчик (если > 1) — как у миниатюр
             if (count > 1)
             {
                 string txt = count.ToString();
-                using var font = new Font("Segoe UI", 16, FontStyle.Bold);
+                using var font = new Font("Segoe UI", 12, FontStyle.Bold);
                 var size = g.MeasureString(txt, font);
 
-                int boxW = (int)size.Width + 10;
-                int boxH = (int)size.Height + 6;
-                int bx = x + w - boxW - 4;
-                int by = y + h - boxH - 4;
+                int boxW = (int)size.Width + 12;
+                int boxH = (int)size.Height + 8;
+                int bx = cardRect.Right - boxW - cardPadding;
+                int by = cardRect.Bottom - boxH - cardPadding;
 
-                using (var brushBg = new SolidBrush(Color.FromArgb(200, Color.Black)))
-                    g.FillRectangle(brushBg, bx, by, boxW, boxH);
-
-                using (var pen = new Pen(Color.White))
-                    g.DrawRectangle(pen, bx, by, boxW, boxH);
-
+                using (var brushBg = new SolidBrush(Color.FromArgb(220, 0, 0, 0)))
+                using (var penBox = new Pen(Color.White))
                 using (var brushText = new SolidBrush(Color.White))
+                {
+                    g.FillRectangle(brushBg, bx, by, boxW, boxH);
+                    g.DrawRectangle(penBox, bx, by, boxW, boxH);
                     g.DrawString(txt, font, brushText, bx + 5, by + 3);
+                }
             }
         }
 
         return bmp;
     }
-
-
 
 
 
